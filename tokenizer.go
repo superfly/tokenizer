@@ -1,41 +1,32 @@
-package main
+package tokenizer
 
 import (
-	"crypto/subtle"
 	"encoding/pem"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"strings"
 
 	"github.com/elazarl/goproxy"
 	"github.com/sirupsen/logrus"
 )
 
 const (
-	caPath             = "/_proxy_ca"
-	headerAuth         = "Proxy-Authorization"
-	headerReplace      = "X-Tokenizer-Replace"
-	headerReplaceDelim = "="
-	dataAuthType       = "auth type"
-	dataSecret         = "secret"
-	authTypeSecret     = "shared secret"
+	caPath        = "/_proxy_ca"
+	headerReplace = "X-Tokenizer-Replace"
 )
 
 type tokenizer struct {
 	*goproxy.ProxyHttpServer
-	secrets secretStore
+	secrets SecretStore
 }
 
 var _ goproxy.HttpsHandler = new(tokenizer)
 var _ goproxy.ReqHandler = new(tokenizer)
 var _ http.Handler = new(tokenizer)
 
-func newTokenizer(vault secretStore) *tokenizer {
+func NewTokenizer(ss SecretStore) *tokenizer {
 	ca := newFakeCA()
 	proxy := goproxy.NewProxyHttpServer()
-	tkz := &tokenizer{ProxyHttpServer: proxy, secrets: vault}
+	tkz := &tokenizer{ProxyHttpServer: proxy, secrets: ss}
 
 	proxy.CertStore = ca
 	proxy.OnRequest().HandleConnect(tkz)
@@ -58,86 +49,57 @@ func newTokenizer(vault secretStore) *tokenizer {
 
 // HandleConnect implements goproxy.HttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-	auth := ctx.Req.Header.Get(headerAuth)
-	if auth == "" {
-		logrus.Warn("missing auth header")
-		ctx.Resp = &http.Response{StatusCode: http.StatusProxyAuthRequired}
-		return goproxy.RejectConnect, ""
-	}
-
 	hdrs := ctx.Req.Header[headerReplace]
-	mapping := make(map[string]string, len(hdrs))
-	ctx.UserData = mapping
+	processors := make([]RequestProcessor, 0, len(hdrs))
 
 	for _, hdr := range hdrs {
-		token, path, ok := strings.Cut(hdr, headerReplaceDelim)
-		if !ok {
+		secretKey, processorParams, err := parseHeaderReplace(hdr)
+		if err != nil {
 			logrus.WithField("hdr", hdr).Warn("bad replace header")
 			ctx.Resp = &http.Response{StatusCode: http.StatusBadRequest}
 			return goproxy.RejectConnect, ""
 		}
 
-		data, err := t.secrets.get(ctx.Req.Context(), path)
+		secret, err := t.secrets.get(ctx.Req.Context(), secretKey)
 		switch {
-		case errors.Is(err, errNotFound):
-			logrus.WithField("path", path).Warn("bad path")
+		case errors.Is(err, ErrNotFound):
+			logrus.WithField("key", secretKey).Warn("bad key")
 			ctx.Resp = &http.Response{StatusCode: http.StatusNotFound}
 			return goproxy.RejectConnect, ""
 		case err != nil:
-			logrus.WithError(err).Warn("failed vault lookup")
+			logrus.WithError(err).Warn("failed secret lookup")
 			ctx.Resp = &http.Response{StatusCode: http.StatusNotFound}
 			return goproxy.RejectConnect, ""
 		}
 
-		if err = t.authorize(auth, data); err != nil {
+		if err := secret.AuthorizeAccess(ctx.Req); err != nil {
 			logrus.WithError(err).Warn("failed authz")
 			ctx.Resp = &http.Response{StatusCode: http.StatusUnauthorized}
 			return goproxy.RejectConnect, ""
 		}
 
-		mapping[token] = data[dataSecret]
-	}
-
-	return goproxy.MitmConnect, host
-}
-
-const authSecret = "my secret"
-
-func (t *tokenizer) authorize(auth string, data map[string]string) error {
-	switch data[dataAuthType] {
-	case authTypeSecret:
-		if subtle.ConstantTimeCompare([]byte(auth), []byte(authSecret)) == 1 {
-			return nil
+		processor, err := secret.Processor(processorParams)
+		if err != nil {
+			logrus.WithError(err).Warn("bad secret")
+			ctx.Resp = &http.Response{StatusCode: http.StatusInternalServerError}
+			return goproxy.RejectConnect, ""
 		}
-		return errors.New("bad auth secret")
-	default:
-		return fmt.Errorf("bad auth type: %s", data[dataAuthType])
+
+		processors = append(processors, processor)
 	}
+
+	ctx.UserData = processors
+	return goproxy.MitmConnect, host
 }
 
 // Handle implements goproxy.ReqHandler
 func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	// todo make this good
-	mapping := ctx.UserData.(map[string]string)
-	for token, replacement := range mapping {
-		for _, v := range req.Header {
-			for i := range v {
-				if v[i] == token {
-					v[i] = replacement
-				}
-			}
+	processors := ctx.UserData.([]RequestProcessor)
+	for _, processor := range processors {
+		if err := processor(req); err != nil {
+			logrus.WithError(err).Warn("processor failure")
+			return nil, &http.Response{StatusCode: http.StatusBadRequest}
 		}
 	}
-
 	return req, nil
-}
-
-func replaceReader(mapping map[string]string, r io.Reader) {
-}
-
-func replaceString(mapping map[string]string, str string) string {
-	for token, replacement := range mapping {
-		str = strings.ReplaceAll(str, token, replacement)
-	}
-	return str
 }

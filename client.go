@@ -1,6 +1,8 @@
-package main
+package tokenizer
 
 import (
+	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -8,48 +10,112 @@ import (
 	"net/url"
 )
 
-var baseClient *http.Client
+type ClientOption func(*http.Transport) error
 
-func init() {
-	baseClient = http.DefaultClient
+func WithSecret(key string, params map[string]string) ClientOption {
+	hdr := formatHeaderReplace(key, params)
+	return func(t *http.Transport) error {
+		t.ProxyConnectHeader.Add(headerReplace, hdr)
+		return nil
+	}
 }
 
-func NewClient(proxyURL string, auth string, tokenToPath map[string]string) (*http.Client, error) {
-	baseURL, err := url.Parse(proxyURL)
-	if err != nil {
-		return nil, err
+func WithProxy(u string) ClientOption {
+	return func(t *http.Transport) error {
+		baseURL, err := url.Parse(u)
+		if err != nil {
+			return err
+		}
+
+		caURL := baseURL.JoinPath(caPath)
+		tmpClient := &http.Client{Transport: t}
+		resp, err := tmpClient.Get(caURL.String())
+		if err != nil {
+			return err
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+
+		if t.TLSClientConfig.RootCAs == nil {
+			t.TLSClientConfig.RootCAs, err = x509.SystemCertPool()
+			if err != nil {
+				return err
+			}
+		} else {
+			t.TLSClientConfig.RootCAs = t.TLSClientConfig.RootCAs.Clone()
+		}
+		if !t.TLSClientConfig.RootCAs.AppendCertsFromPEM(body) {
+			return errors.New("no ca certs")
+		}
+
+		t.Proxy = http.ProxyURL(baseURL)
+
+		return nil
+	}
+}
+
+func WithProxyAuth(auth string) ClientOption {
+	return func(t *http.Transport) error {
+		t.ProxyConnectHeader.Add(headerProxyAuthorization, auth)
+		return nil
+	}
+}
+
+func Client(baseClient *http.Client, opts ...ClientOption) (*http.Client, error) {
+	if baseClient == nil {
+		baseClient = &http.Client{}
 	}
 
-	caURL := baseURL.JoinPath(caPath)
-	resp, err := baseClient.Get(caURL.String())
-	if err != nil {
-		return nil, err
+	rt := baseClient.Transport
+	if rt == nil {
+		rt = &http.Transport{}
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	t, ok := rt.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("bad transport: %T", rt)
 	}
 
-	baseTransport, isHttpTransport := baseClient.Transport.(*http.Transport)
-	if !isHttpTransport {
-		return nil, errors.New("bad default transport")
+	t = t.Clone()
+	t.ForceAttemptHTTP2 = false
+
+	if t.ProxyConnectHeader == nil {
+		t.ProxyConnectHeader = make(http.Header)
 	}
 
-	transport := baseTransport.Clone()
-	transport.Proxy = http.ProxyURL(baseURL)
-	transport.ProxyConnectHeader = map[string][]string{
-		headerAuth: {auth},
+	if t.OnProxyConnectResponse == nil {
+		t.OnProxyConnectResponse = func(_ context.Context, _ *url.URL, _ *http.Request, res *http.Response) error {
+			if res.StatusCode != http.StatusOK {
+				if body, err := io.ReadAll(res.Body); err == nil {
+					return ClientError{Status: res.StatusCode, Msg: string(body)}
+				}
+				return ClientError{Status: res.StatusCode}
+			}
+			return nil
+		}
 	}
 
-	for token, path := range tokenToPath {
-		transport.ProxyConnectHeader.Add(headerReplace, fmt.Sprintf("%s=%s", token, path))
+	for _, opt := range opts {
+		if err := opt(t); err != nil {
+			return nil, err
+		}
 	}
 
-	transport.TLSClientConfig.RootCAs = transport.TLSClientConfig.RootCAs.Clone()
-	if !transport.TLSClientConfig.RootCAs.AppendCertsFromPEM(body) {
-		return nil, errors.New("no ca certs")
-	}
+	return &http.Client{Transport: t}, nil
+}
 
-	return &http.Client{Transport: transport}, nil
+type ClientError struct {
+	Status int
+	Msg    string
+}
+
+func (err ClientError) Error() string {
+	var msgStr string
+	if err.Msg != "" {
+		msgStr = fmt.Sprintf(" msg=%s", err.Msg)
+	}
+	return fmt.Sprintf("tokenizer client error: status=%d%s", err.Status, msgStr)
 }
