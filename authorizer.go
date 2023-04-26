@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/sirupsen/logrus"
@@ -50,7 +50,7 @@ func sharedSecretAuthorizer(hexSHA256SecretDigest string) Authorizer {
 			}
 		}
 		if !found {
-			return errors.New("bad or missing proxy auth")
+			return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
 		}
 
 		return nil

@@ -10,7 +10,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/tokenizer"
-	_ "github.com/superfly/tokenizer/processors/inject-bearer"
+	_ "github.com/superfly/tokenizer/processors/inject"
 )
 
 func main() {

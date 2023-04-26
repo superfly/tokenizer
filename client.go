@@ -2,120 +2,79 @@ package tokenizer
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
+
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
-type ClientOption func(*http.Transport) error
+var downstreamTrust *x509.CertPool
+
+func init() {
+	var err error
+	downstreamTrust, err = x509.SystemCertPool()
+	if err != nil {
+		panic(err)
+	}
+}
+
+type ClientOption http.Header
 
 func WithSecret(key string, params map[string]string) ClientOption {
-	hdr := formatHeaderReplace(key, params)
-	return func(t *http.Transport) error {
-		t.ProxyConnectHeader.Add(headerReplace, hdr)
-		return nil
-	}
+	return ClientOption(http.Header{headerReplace: {formatHeaderReplace(key, params)}})
 }
 
-func WithProxy(u string) ClientOption {
-	return func(t *http.Transport) error {
-		baseURL, err := url.Parse(u)
-		if err != nil {
-			return err
-		}
-
-		caURL := baseURL.JoinPath(caPath)
-		tmpClient := &http.Client{Transport: t}
-		resp, err := tmpClient.Get(caURL.String())
-		if err != nil {
-			return err
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-
-		if t.TLSClientConfig.RootCAs == nil {
-			t.TLSClientConfig.RootCAs, err = x509.SystemCertPool()
-			if err != nil {
-				return err
-			}
-		} else {
-			t.TLSClientConfig.RootCAs = t.TLSClientConfig.RootCAs.Clone()
-		}
-		if !t.TLSClientConfig.RootCAs.AppendCertsFromPEM(body) {
-			return errors.New("no ca certs")
-		}
-
-		t.Proxy = http.ProxyURL(baseURL)
-
-		return nil
-	}
+func WithAuth(auth string) ClientOption {
+	return ClientOption(http.Header{headerProxyAuthorization: {auth}})
 }
 
-func WithProxyAuth(auth string) ClientOption {
-	return func(t *http.Transport) error {
-		t.ProxyConnectHeader.Add(headerProxyAuthorization, auth)
-		return nil
-	}
-}
-
-func Client(baseClient *http.Client, opts ...ClientOption) (*http.Client, error) {
-	if baseClient == nil {
-		baseClient = &http.Client{}
+func Client(proxyURL string, opts ...ClientOption) (*http.Client, error) {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, err
 	}
 
-	rt := baseClient.Transport
-	if rt == nil {
-		rt = &http.Transport{}
+	hdrs := make(http.Header, len(opts))
+	for _, o := range opts {
+		mergeHeader(hdrs, o)
 	}
 
-	t, ok := rt.(*http.Transport)
-	if !ok {
-		return nil, fmt.Errorf("bad transport: %T", rt)
-	}
-
-	t = t.Clone()
-	t.ForceAttemptHTTP2 = false
-
-	if t.ProxyConnectHeader == nil {
-		t.ProxyConnectHeader = make(http.Header)
-	}
-
-	if t.OnProxyConnectResponse == nil {
-		t.OnProxyConnectResponse = func(_ context.Context, _ *url.URL, _ *http.Request, res *http.Response) error {
-			if res.StatusCode != http.StatusOK {
-				if body, err := io.ReadAll(res.Body); err == nil {
-					return ClientError{Status: res.StatusCode, Msg: string(body)}
-				}
-				return ClientError{Status: res.StatusCode}
-			}
-			return nil
-		}
-	}
-
-	for _, opt := range opts {
-		if err := opt(t); err != nil {
-			return nil, err
-		}
-	}
+	var t http.RoundTripper
+	t = &http.Transport{Proxy: http.ProxyURL(u), TLSClientConfig: &tls.Config{RootCAs: downstreamTrust}}
+	t = headerInjector(t, hdrs)
 
 	return &http.Client{Transport: t}, nil
 }
 
-type ClientError struct {
-	Status int
-	Msg    string
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (rtf roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return rtf(req)
 }
 
-func (err ClientError) Error() string {
-	var msgStr string
-	if err.Msg != "" {
-		msgStr = fmt.Sprintf(" msg=%s", err.Msg)
+type ctxKey string
+
+var ctxKeyInjected ctxKey = "injected"
+
+func headerInjector(t http.RoundTripper, h http.Header) http.RoundTripper {
+	return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		// avoid duplicate injections on retries, etc...
+		if r.Context().Value(ctxKeyInjected) == nil {
+			r = r.WithContext(context.WithValue(r.Context(), ctxKeyInjected, true))
+			r.Header = maps.Clone(r.Header)
+			mergeHeader(r.Header, h)
+		}
+		return t.RoundTrip(r)
+	})
+}
+
+func mergeHeader(dst, src map[string][]string) {
+	for k, vs := range src {
+		dst[k] = append(dst[k], vs...)
+		slices.Sort(dst[k])
+		dst[k] = slices.Compact(dst[k])
 	}
-	return fmt.Sprintf("tokenizer client error: status=%d%s", err.Status, msgStr)
 }

@@ -1,18 +1,31 @@
 package tokenizer
 
 import (
-	"encoding/pem"
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/elazarl/goproxy"
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	caPath        = "/_proxy_ca"
-	headerReplace = "X-Tokenizer-Replace"
-)
+var upstreamTrust *x509.CertPool
+
+func init() {
+	var err error
+	upstreamTrust, err = x509.SystemCertPool()
+	if err != nil {
+		panic(err)
+	}
+}
+
+const headerReplace = "X-Tokenizer-Replace"
 
 type tokenizer struct {
 	*goproxy.ProxyHttpServer
@@ -24,82 +37,126 @@ var _ goproxy.ReqHandler = new(tokenizer)
 var _ http.Handler = new(tokenizer)
 
 func NewTokenizer(ss SecretStore) *tokenizer {
-	ca := newFakeCA()
 	proxy := goproxy.NewProxyHttpServer()
 	tkz := &tokenizer{ProxyHttpServer: proxy, secrets: ss}
 
-	proxy.CertStore = ca
+	proxy.Tr = &http.Transport{Dial: forceTLSDialer}
 	proxy.OnRequest().HandleConnect(tkz)
 	proxy.OnRequest().Do(tkz)
-	proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != caPath {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		for _, cert := range ca.Chain() {
-			pem.Encode(w, &pem.Block{
-				Type:  "CERTIFICATE",
-				Bytes: cert.Raw,
-			})
-		}
-	})
 
 	return tkz
 }
 
 // HandleConnect implements goproxy.HttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-	hdrs := ctx.Req.Header[headerReplace]
+	logrus.Info("HandleConnect")
+
+	_, port, _ := strings.Cut(host, ":")
+	if port != "80" {
+		logrus.WithField("host", host).Warn("attempt to proxy to https downstream")
+		ctx.Resp = &http.Response{StatusCode: http.StatusBadRequest}
+		return goproxy.RejectConnect, ""
+	}
+
+	processors, err := t.processorsFromRequest(ctx.Req)
+	if err != nil {
+		ctx.Resp = errorResponse(err)
+		return goproxy.RejectConnect, ""
+	}
+
+	ctx.UserData = processors
+	return goproxy.HTTPMitmConnect, host
+}
+
+// Handle implements goproxy.ReqHandler
+func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	logrus.Info("Handle")
+
+	var processors []RequestProcessor
+	if ctx.UserData != nil {
+		processors = ctx.UserData.([]RequestProcessor)
+	}
+
+	if reqProcessors, err := t.processorsFromRequest(req); err != nil {
+		return req, errorResponse(err)
+	} else {
+		processors = append(processors, reqProcessors...)
+	}
+
+	for _, processor := range processors {
+		if err := processor(req); err != nil {
+			logrus.WithError(err).Warn("run processor")
+			return nil, &http.Response{StatusCode: http.StatusBadRequest}
+		}
+	}
+
+	delete(req.Header, headerProxyAuthorization)
+	delete(req.Header, headerReplace)
+
+	return req, nil
+}
+
+func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, error) {
+	hdrs := req.Header[headerReplace]
 	processors := make([]RequestProcessor, 0, len(hdrs))
 
 	for _, hdr := range hdrs {
 		secretKey, processorParams, err := parseHeaderReplace(hdr)
 		if err != nil {
-			logrus.WithField("hdr", hdr).Warn("bad replace header")
-			ctx.Resp = &http.Response{StatusCode: http.StatusBadRequest}
-			return goproxy.RejectConnect, ""
+			logrus.WithError(err).WithField("hdr", hdr).Warn("parse replace header")
+			return nil, err
 		}
 
-		secret, err := t.secrets.get(ctx.Req.Context(), secretKey)
-		switch {
-		case errors.Is(err, ErrNotFound):
-			logrus.WithField("key", secretKey).Warn("bad key")
-			ctx.Resp = &http.Response{StatusCode: http.StatusNotFound}
-			return goproxy.RejectConnect, ""
-		case err != nil:
-			logrus.WithError(err).Warn("failed secret lookup")
-			ctx.Resp = &http.Response{StatusCode: http.StatusNotFound}
-			return goproxy.RejectConnect, ""
+		secret, err := t.secrets.get(req.Context(), secretKey)
+		if err != nil {
+			logrus.WithError(err).WithField("key", secretKey).Warn("secret lookup")
+			return nil, err
 		}
 
-		if err := secret.AuthorizeAccess(ctx.Req); err != nil {
+		if err := secret.AuthorizeAccess(req); err != nil {
 			logrus.WithError(err).Warn("failed authz")
-			ctx.Resp = &http.Response{StatusCode: http.StatusUnauthorized}
-			return goproxy.RejectConnect, ""
+			return nil, err
 		}
 
 		processor, err := secret.Processor(processorParams)
 		if err != nil {
-			logrus.WithError(err).Warn("bad secret")
-			ctx.Resp = &http.Response{StatusCode: http.StatusInternalServerError}
-			return goproxy.RejectConnect, ""
+			logrus.WithError(err).Warn("processor lookup")
+			return nil, err
 		}
 
 		processors = append(processors, processor)
 	}
 
-	ctx.UserData = processors
-	return goproxy.MitmConnect, host
+	return processors, nil
 }
 
-// Handle implements goproxy.ReqHandler
-func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	processors := ctx.UserData.([]RequestProcessor)
-	for _, processor := range processors {
-		if err := processor(req); err != nil {
-			logrus.WithError(err).Warn("processor failure")
-			return nil, &http.Response{StatusCode: http.StatusBadRequest}
-		}
+func errorResponse(err error) *http.Response {
+	status := http.StatusBadGateway
+	switch {
+	case errors.Is(err, ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, ErrNotAuthorized):
+		status = http.StatusProxyAuthRequired
+	case errors.Is(err, ErrBadRequest):
+		status = http.StatusBadRequest
 	}
-	return req, nil
+
+	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader([]byte(err.Error())))}
+}
+
+func forceTLSDialer(network, addr string) (net.Conn, error) {
+	logrus.Info("forceTLSDialer")
+
+	if network != "tcp" {
+		return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
+	}
+	hostname, port, _ := strings.Cut(addr, ":")
+	switch port {
+	case "443":
+		return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
+	case "80":
+		port = "443"
+	}
+	addr = fmt.Sprintf("%s:%s", hostname, port)
+	return tls.Dial("tcp", addr, &tls.Config{RootCAs: upstreamTrust})
 }

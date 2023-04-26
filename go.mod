@@ -8,6 +8,7 @@ require (
 	github.com/elazarl/goproxy v0.0.0-20221015165544-a0805db90819
 	github.com/hashicorp/vault/api v1.9.0
 	github.com/sirupsen/logrus v1.9.0
+	golang.org/x/exp v0.0.0-20230425010034-47ecfdc1ba53
 )
 
 require (

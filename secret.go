@@ -8,7 +8,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("not found")
+	ErrNotFound      = errors.New("not found")
+	ErrNotAuthorized = errors.New("not authorized")
+	ErrBadRequest    = errors.New("bad request")
 )
 
 type SecretStore interface {
@@ -21,6 +23,7 @@ const (
 	SecretKeyAuthorizer = "authorizer"
 	SecretKeyProcessor  = "processor"
 	SecretKeySecret     = "secret"
+	SecretKeyHash       = "hash"
 )
 
 func (s Secret) AuthorizeAccess(r *http.Request) error {

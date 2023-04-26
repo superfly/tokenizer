@@ -5,5 +5,5 @@ import (
 )
 
 func init() {
-	tokenizer.RegisterProcessor("inject-bearer", tokenizer.InjectBearer)
+	tokenizer.RegisterProcessor("inject", tokenizer.Inject)
 }
