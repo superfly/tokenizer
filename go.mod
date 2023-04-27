@@ -4,7 +4,6 @@ go 1.20
 
 require (
 	github.com/alecthomas/assert/v2 v2.2.2
-	github.com/btoews/fakeca v0.0.0-20230414213812-7dd16bbf44fc
 	github.com/elazarl/goproxy v0.0.0-20221015165544-a0805db90819
 	github.com/hashicorp/vault/api v1.9.0
 	github.com/sirupsen/logrus v1.9.0

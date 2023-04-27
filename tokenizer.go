@@ -15,6 +15,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var FilteredHeaders = []string{headerProxyAuthorization, headerReplace}
+
 var upstreamTrust *x509.CertPool
 
 func init() {
@@ -40,6 +42,18 @@ func NewTokenizer(ss SecretStore) *tokenizer {
 	proxy := goproxy.NewProxyHttpServer()
 	tkz := &tokenizer{ProxyHttpServer: proxy, secrets: ss}
 
+	// fly-proxy rewrites incoming requests to not include the full URI so we
+	// have to look at the host header.
+	tkz.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host == "" {
+			http.Error(w, "must specify host", 400)
+			return
+		}
+		r.URL.Scheme = "http"
+		r.URL.Host = r.Host
+		tkz.ServeHTTP(w, r)
+	})
+
 	proxy.Tr = &http.Transport{Dial: forceTLSDialer}
 	proxy.OnRequest().HandleConnect(tkz)
 	proxy.OnRequest().Do(tkz)
@@ -49,8 +63,6 @@ func NewTokenizer(ss SecretStore) *tokenizer {
 
 // HandleConnect implements goproxy.HttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-	logrus.Info("HandleConnect")
-
 	_, port, _ := strings.Cut(host, ":")
 	if port != "80" {
 		logrus.WithField("host", host).Warn("attempt to proxy to https downstream")
@@ -70,8 +82,6 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 
 // Handle implements goproxy.ReqHandler
 func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	logrus.Info("Handle")
-
 	var processors []RequestProcessor
 	if ctx.UserData != nil {
 		processors = ctx.UserData.([]RequestProcessor)
@@ -90,8 +100,9 @@ func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Requ
 		}
 	}
 
-	delete(req.Header, headerProxyAuthorization)
-	delete(req.Header, headerReplace)
+	for _, h := range FilteredHeaders {
+		delete(req.Header, h)
+	}
 
 	return req, nil
 }
@@ -145,8 +156,6 @@ func errorResponse(err error) *http.Response {
 }
 
 func forceTLSDialer(network, addr string) (net.Conn, error) {
-	logrus.Info("forceTLSDialer")
-
 	if network != "tcp" {
 		return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
 	}

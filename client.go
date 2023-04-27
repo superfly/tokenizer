@@ -43,7 +43,11 @@ func Client(proxyURL string, opts ...ClientOption) (*http.Client, error) {
 	}
 
 	var t http.RoundTripper
-	t = &http.Transport{Proxy: http.ProxyURL(u), TLSClientConfig: &tls.Config{RootCAs: downstreamTrust}}
+	t = &http.Transport{
+		Proxy:             http.ProxyURL(u),
+		TLSClientConfig:   &tls.Config{RootCAs: downstreamTrust},
+		ForceAttemptHTTP2: true,
+	}
 	t = headerInjector(t, hdrs)
 
 	return &http.Client{Transport: t}, nil
