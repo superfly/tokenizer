@@ -32,14 +32,14 @@ const (
 	ParamPayload = "msg"
 )
 
-func parseHeaderReplace(hdr string) (string, map[string]string, error) {
+func parseHeaderProxyTokenizer(hdr string) (string, map[string]string, error) {
 	secretKey, paramJSON, _ := strings.Cut(hdr, ";")
 
 	secretKey = strings.TrimFunc(secretKey, unicode.IsSpace)
 	paramJSON = strings.TrimFunc(paramJSON, unicode.IsSpace)
 
 	if secretKey == "" {
-		return "", nil, fmt.Errorf("%w: bad replace header", ErrBadRequest)
+		return "", nil, fmt.Errorf("%w: bad tokenizer header", ErrBadRequest)
 	}
 
 	processorParams := make(map[string]string)
@@ -52,7 +52,7 @@ func parseHeaderReplace(hdr string) (string, map[string]string, error) {
 	return secretKey, processorParams, nil
 }
 
-func formatHeaderReplace(secretKey string, processorParams map[string]string) string {
+func formatHeaderProxyTokenizer(secretKey string, processorParams map[string]string) string {
 	hdr := secretKey
 
 	if len(processorParams) > 0 {

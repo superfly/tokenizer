@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,53 +31,48 @@ func init() {
 }
 
 func main() {
-	// vault, err := vaultInfraLoginFromEnv()
-	// if err != nil {
-	// 	logrus.Fatal(err)
-	// }
-	// ss := tokenizer.VaultSecretStore(vault)
-
 	ssAuth := os.Getenv("SHARED_SECRET_DIGEST")
 	if ssAuth == "" {
 		logrus.Fatal("missing SHARED_SECRET_DIGEST environment variable")
 	}
 	tokenizer.RegisterSharedSecretAuthorizer("secret", ssAuth)
 
-	ssJSON := os.Getenv("SECRET_STORE")
-	if ssJSON == "" {
-		logrus.Fatal("missing SECRET_STORE environment variable")
+	var ss tokenizer.SecretStore
+	if ssJSON := os.Getenv("SECRET_STORE"); ssJSON != "" {
+		if ssJSON == "" {
+			logrus.Fatal("missing SECRET_STORE environment variable")
+		}
+
+		sss := make(tokenizer.StaticSecretStore)
+		if err := json.Unmarshal([]byte(ssJSON), &sss); err != nil {
+			logrus.WithError(err).Fatal("parsing SECRET_STORE environment variable")
+		}
+
+		ss = sss
+	} else {
+		vault, err := vaultInfraLoginFromEnv()
+		if err != nil {
+			logrus.Fatal(err)
+		}
+
+		ss = tokenizer.VaultSecretStore(vault)
 	}
 
-	ss := make(tokenizer.StaticSecretStore)
-	if err := json.Unmarshal([]byte(ssJSON), &ss); err != nil {
-		logrus.WithError(err).Fatal("parsing SECRET_STORE environment variable")
-	}
-
-	addr := "0.0.0.0:8080"
+	// specify port for local dev
+	addr := ":8080"
 	if port := os.Getenv("PORT"); port != "" {
 		addr = fmt.Sprintf("127.0.0.1:%s", port)
 	}
 
-	tkz := tokenizer.NewTokenizer(ss)
-	tkz.ProxyHttpServer.Verbose = true
-
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		logrus.WithError(err).Fatal("listening")
-	}
-
-	certPath := os.Getenv("CERT_PATH")
-	keyPath := os.Getenv("KEY_PATH")
-	if certPath != "" && keyPath != "" {
-		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-		if err != nil {
-			logrus.WithError(err).Fatal("load tls")
-		}
-
-		l = tls.NewListener(l, &tls.Config{Certificates: []tls.Certificate{cert}})
+		logrus.WithError(err).Fatal("listen")
 	}
 
 	l = debugListener{l}
+
+	tkz := tokenizer.NewTokenizer(ss)
+	tkz.ProxyHttpServer.Verbose = true
 
 	server := &http.Server{Addr: addr, Handler: tkz}
 

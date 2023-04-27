@@ -15,7 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var FilteredHeaders = []string{headerProxyAuthorization, headerReplace}
+var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
 
 var upstreamTrust *x509.CertPool
 
@@ -27,7 +27,7 @@ func init() {
 	}
 }
 
-const headerReplace = "X-Tokenizer-Replace"
+const headerProxyTokenizer = "Proxy-Tokenizer"
 
 type tokenizer struct {
 	*goproxy.ProxyHttpServer
@@ -101,20 +101,20 @@ func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Requ
 	}
 
 	for _, h := range FilteredHeaders {
-		delete(req.Header, h)
+		req.Header.Del(h)
 	}
 
 	return req, nil
 }
 
 func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, error) {
-	hdrs := req.Header[headerReplace]
+	hdrs := req.Header[headerProxyTokenizer]
 	processors := make([]RequestProcessor, 0, len(hdrs))
 
 	for _, hdr := range hdrs {
-		secretKey, processorParams, err := parseHeaderReplace(hdr)
+		secretKey, processorParams, err := parseHeaderProxyTokenizer(hdr)
 		if err != nil {
-			logrus.WithError(err).WithField("hdr", hdr).Warn("parse replace header")
+			logrus.WithError(err).WithField("hdr", hdr).Warn("parse tokenizer header")
 			return nil, err
 		}
 

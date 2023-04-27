@@ -20,7 +20,11 @@ func main() {
 		secretKey = mustGetEnv("SECRET_KEY")
 	)
 
-	client, err := tokenizer.Client(proxyURL, tokenizer.WithAuth(proxyAuth), tokenizer.WithSecret(secretKey, nil))
+	client, err := tokenizer.Client(
+		proxyURL,
+		tokenizer.WithAuth(fmt.Sprintf("Bearer %s", proxyAuth)),
+		tokenizer.WithSecret(secretKey, nil),
+	)
 	if err != nil {
 		fatalf("bad params: %s", err)
 	}

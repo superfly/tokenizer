@@ -1,29 +1,68 @@
-We integrate with third parties, which necessitates talking to third party APIs, which necessitates having third party API tokens. API tokens are scary because bad things happen when they're leaked/stolen.
+# Tokenizer
 
-To make this less scary, we could build an HTTP proxy that injects API tokens into requests for us, much akin to credit card tokenization. Web can store API tokens in Vault and connect to third party APIs via this tokenizer proxy. The proxy would inject API tokens into the right parts of requests while forwarding them to the third party API.
+This is an HTTP proxy that injects third party authentication credentials into requests. Authentication secrets are stored in Vault along with metadata about how they may be used. The client includes a `Proxy-Tokenizer` header in requests, instructing the proxy where to inject API credentials. The proxy ensures the client is authorized to use the secret by validating the `Proxy-Authorization` header.
 
-There are a few tricky bits we'd need to figure out:
+Here's an example secret that could be stored in Vault under the path `/tokenizer/stripe`
 
-### Injecting tokens
+```json
+{
+    // The actual secret value
+    "secret": "my-stripe-api-key",
 
-The proxy needs to know where in client requests to inject tokens and which tokens to inject. I propose we specify ax HTTP header like this
+    // How the proxy should authenticate the client.
+    "authorizer": "secret",
 
+    // Which "processor" the proxy should use for getting the secret into
+    // requests.
+    "processor": "inject"
+}
 ```
-X-Tokenizer-Replace: <nonce>=<vault secret name>
+
+The client configures their HTTP library to use the tokenizer service as it's HTTP proxy:
+
+```ruby
+conn = Faraday.new(
+    proxy: "http://tokenizer.flycast", 
+    headers: {
+        proxy_tokenizer: "foo", 
+        proxy_authorization: "Bearer myproxysecret"
+    }
+)
+
+conn.get("http://api.stripe.com")
 ```
 
-Here, `nonce` is a random string that's generated per-request. Tokenizer receives this header in the `CONNECT` request and replaces all occurrences of `nonce` with the token stored in vault under `vault secret name` for the duration of the proxy connection.
+The request will get rewritten to look like this:
 
-### Authenticating/authorizing proxy clients
+```http
+GET / HTTP/1.1
+Host: api.stripe.com
+Authorization: my-stripe-api-key
+```
 
-We need to know who the HTTP client is and that they're authorized to use the API token.
+The `Proxy-Tokenizer` header instructs the proxy to lookup and use the secret named `foo`. The `Proxy-Authorization` header satisfies the includes the token that authenticates the client to the proxy.
 
-For tokens that we only envision being used while we're talking to the user, we can use macaroons for authentication. Alongside the token in vault, we can store a macaroon "fact" (see [this doc](https://flyio.slab.com/posts/macaroon-concepts-facts-and-caveats-fewldfsy) if that terminology is new to you). Our HTTP `CONNECT` request to the proxy would then include a user macaroon in the `Proxy-Authorization` header. The tokenizer would validate any facts found alongside the API token in vault using the provided macaroon.
+Notice that our eventual request is to _http_://api.stripe.com. In order for the proxy to be able to inject credentials into requests we need to speak plain HTTP to the proxy server, not HTTPS. The proxy transparently switches to HTTPS for connections to upstream services. We could use HTTPS for communication between the client and the proxy server, but flycast is already going over WireGuard and it's simpler to use HTTP.
 
-For example, if we only want to use this token when interacting with users that have read access to org 123, we would store `{"orgId": 123, "action": "r"}` alongside the API token. Authorized users' macaroons would satisfy this fact.
+## Processors
 
-If we envision making calls to the third party API when we're _not_ talking to a user, we could authenticate the HTTP client with a static secret that is shared between the tokenizer and the proxy client (web). Instead of storing a fact alongside the token in Vault, we could store some indication that this token can be used with the shared secret.
+Processors dictate how the secret in vault get's turned into valid credentials for a request and are added to the request. The example above uses the `inject` processor (configured in the Vault secret), which simply injects the verbatim secret into a request header. By default, this injects the secret into the `Authorization` header without further processing.
 
-### Not leaking tokens
+The client can include parameters to change this behavior though:
 
-To be extra sure that we don't leak tokens, we should store the 3rd party API hostname alongside the token in vault. The tokenizer should ensure that this matches before injecting tokens into requests.
+```ruby
+conn.headers[:proxy_tokenizer] = 'foo; {"dst": "My-Custom-Header", "fmt": "Bearer %s"}'
+conn.get("http://api.stripe.com")
+```
+
+The request will get rewritten to look like this:
+
+```http
+GET / HTTP/1.1
+Host: api.stripe.com
+My-Custom-Header: Bearer my-stripe-api-key
+```
+
+The parameters are supplied as JSON in the `Proxy-Tokenizer` header after the secret name. The `dst` parameter instructs the processor to put the secret in the `My-Custom-Header` header and the `fmt` parameter is a printf-style format string that is applied to the secret.
+
+Aside from the `inject` processor, we have the `inject-hmac` processor. This uses the secret from Vault as the key for creating an HMAC signature which is then injected into a request header. The hash algorithm can be specified in the Vault secret under the key `hash` and defaults to SHA256. This processor signs the verbatim request body by default, but can sign custom messages specified in the `msg` parameter in the `Proxy-Tokenizer` header. It also respects the `dst` and `fmt` parameters.

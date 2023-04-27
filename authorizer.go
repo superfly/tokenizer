@@ -3,9 +3,11 @@ package tokenizer
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -43,7 +45,37 @@ func sharedSecretAuthorizer(hexSHA256SecretDigest string) Authorizer {
 
 	return AuthorizerFunc(func(r *http.Request) error {
 		var found bool
+
+	hdrLoop:
 		for _, hdr := range r.Header.Values(headerProxyAuthorization) {
+			r.BasicAuth()
+
+			scheme, rest, ok := strings.Cut(hdr, " ")
+			if !ok {
+				logrus.Warn("missing authorization scheme")
+				continue hdrLoop
+			}
+
+			switch scheme {
+			case "Bearer":
+				hdr = rest
+			case "Basic":
+				raw, err := base64.StdEncoding.DecodeString(rest)
+				if err != nil {
+					logrus.WithError(err).Warn("bad basic auth encoding")
+					continue hdrLoop
+				}
+				_, pword, ok := strings.Cut(string(raw), ":")
+				if !ok {
+					logrus.Warn("bad basic auth format")
+					continue hdrLoop
+				}
+				hdr = pword
+			default:
+				logrus.WithField("scheme", scheme).Warn("bad authorization scheme")
+				continue hdrLoop
+			}
+
 			hdrDigest := sha256.Sum256([]byte(hdr))
 			if subtle.ConstantTimeCompare(digest, hdrDigest[:]) == 1 {
 				found = true

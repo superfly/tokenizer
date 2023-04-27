@@ -24,7 +24,7 @@ func init() {
 type ClientOption http.Header
 
 func WithSecret(key string, params map[string]string) ClientOption {
-	return ClientOption(http.Header{headerReplace: {formatHeaderReplace(key, params)}})
+	return ClientOption(http.Header{headerProxyTokenizer: {formatHeaderProxyTokenizer(key, params)}})
 }
 
 func WithAuth(auth string) ClientOption {
