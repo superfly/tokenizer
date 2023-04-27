@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -28,7 +29,7 @@ func WithSecret(key string, params map[string]string) ClientOption {
 }
 
 func WithAuth(auth string) ClientOption {
-	return ClientOption(http.Header{headerProxyAuthorization: {auth}})
+	return ClientOption(http.Header{headerProxyAuthorization: {fmt.Sprintf("Bearer %s", auth)}})
 }
 
 func Client(proxyURL string, opts ...ClientOption) (*http.Client, error) {

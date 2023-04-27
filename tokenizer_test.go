@@ -1,6 +1,7 @@
 package tokenizer
 
 import (
+	"bufio"
 	"bytes"
 	"crypto"
 	"crypto/hmac"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -55,11 +57,8 @@ func TestTokenizer(t *testing.T) {
 	})
 	tkz.ProxyHttpServer.Verbose = true
 
-	tkzServer := httptest.NewTLSServer(tkz)
+	tkzServer := httptest.NewServer(tkz)
 	defer tkzServer.Close()
-
-	// make client trust proxy
-	downstreamTrust.AddCert(tkzServer.Certificate())
 
 	client, err := Client(tkzServer.URL)
 	assert.NoError(t, err)
@@ -188,6 +187,26 @@ func TestTokenizer(t *testing.T) {
 	resp, err = client.Do(req)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+
+	// CONNECT proxy
+	conn, err := net.Dial("tcp", tkzServer.Listener.Addr().String())
+	connreader := bufio.NewReader(conn)
+	assert.NoError(t, err)
+	creq, err := http.NewRequest(http.MethodConnect, appURL, nil)
+	assert.NoError(t, err)
+	mergeHeader(creq.Header, WithAuth(s1Auth))
+	mergeHeader(creq.Header, WithSecret(s1Key, nil))
+	assert.NoError(t, creq.Write(conn))
+	resp, err = http.ReadResponse(connreader, creq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// request via CONNECT proxy
+	client = &http.Client{Transport: &http.Transport{Dial: func(network, addr string) (net.Conn, error) { return conn, nil }}}
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {"trustno1"}},
+		Body:    "",
+	}, doEcho(t, client, req))
 }
 
 func randomName(prefix string) string {

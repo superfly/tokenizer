@@ -64,7 +64,7 @@ func NewTokenizer(ss SecretStore) *tokenizer {
 // HandleConnect implements goproxy.HttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 	_, port, _ := strings.Cut(host, ":")
-	if port != "80" {
+	if port == "443" {
 		logrus.WithField("host", host).Warn("attempt to proxy to https downstream")
 		ctx.Resp = &http.Response{StatusCode: http.StatusBadRequest}
 		return goproxy.RejectConnect, ""
