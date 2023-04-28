@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/hmac"
-	"encoding/json"
+	_ "crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"unicode"
-
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -32,55 +28,20 @@ const (
 	ParamPayload = "msg"
 )
 
-func parseHeaderProxyTokenizer(hdr string) (string, map[string]string, error) {
-	secretKey, paramJSON, _ := strings.Cut(hdr, ";")
-
-	secretKey = strings.TrimFunc(secretKey, unicode.IsSpace)
-	paramJSON = strings.TrimFunc(paramJSON, unicode.IsSpace)
-
-	if secretKey == "" {
-		return "", nil, fmt.Errorf("%w: bad tokenizer header", ErrBadRequest)
-	}
-
-	processorParams := make(map[string]string)
-	if paramJSON != "" {
-		if err := json.Unmarshal([]byte(paramJSON), &processorParams); err != nil {
-			return "", nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
-		}
-	}
-
-	return secretKey, processorParams, nil
-}
-
-func formatHeaderProxyTokenizer(secretKey string, processorParams map[string]string) string {
-	hdr := secretKey
-
-	if len(processorParams) > 0 {
-		paramJSON, _ := json.Marshal(processorParams)
-		hdr = fmt.Sprintf("%s; %s", hdr, paramJSON)
-	}
-
-	return hdr
-}
-
-type RequestProcessorFactory func(Secret, map[string]string) (RequestProcessor, error)
-
 type RequestProcessor func(r *http.Request) error
 
-var processorFactoryRegistry = map[string]RequestProcessorFactory{}
-
-func RegisterProcessor(name string, factory RequestProcessorFactory) {
-	if _, dup := processorFactoryRegistry[name]; dup {
-		logrus.Panicf("duplicate processor: %s", name)
-	}
-	processorFactoryRegistry[name] = factory
+type ProcessorConfig interface {
+	Processor(map[string]string) (RequestProcessor, error)
 }
 
-// Inject injects the secret into the specified header. To make this processor
-// available under the "inject" name, import the
-// github.com/superfly/processors/inject package.
-var Inject RequestProcessorFactory = func(s Secret, params map[string]string) (RequestProcessor, error) {
-	f := "%s"
+type InjectProcessorConfig struct {
+	Token string `json:"token"`
+}
+
+var _ ProcessorConfig = new(InjectProcessorConfig)
+
+func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	f := "Bearer %s"
 	if p, ok := params[ParamFmt]; ok {
 		f = p
 	}
@@ -93,31 +54,38 @@ var Inject RequestProcessorFactory = func(s Secret, params map[string]string) (R
 		dst = p
 	}
 
-	secret := s[SecretKeySecret]
-	if secret == "" {
-		return nil, errors.New("missing secret")
+	token := c.Token
+	if token == "" {
+		return nil, errors.New("missing token")
 	}
 
 	return func(r *http.Request) error {
-		r.Header.Set(dst, fmt.Sprintf(f, secret))
+		r.Header.Set(dst, fmt.Sprintf(f, token))
 		return nil
 	}, nil
 }
 
-// InjectHMAC injects the secret into the specified header. To make this processor
-// available under the "inject-hmac" name, import the
-// github.com/superfly/processors/inject-hmac package.
-var InjectHMAC RequestProcessorFactory = func(s Secret, params map[string]string) (RequestProcessor, error) {
-	hi, err := strconv.ParseInt(s[SecretKeyHash], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("bad hash id: %w", err)
-	}
-	h := crypto.Hash(hi)
-	if !h.Available() {
-		return nil, fmt.Errorf("hash %s not imported", h)
+type InjectHMACProcessorConfig struct {
+	Key  []byte `json:"key"`
+	Hash string `json:"hash"`
+}
+
+var _ ProcessorConfig = new(InjectHMACProcessorConfig)
+
+func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	var h crypto.Hash
+	switch c.Hash {
+	case "sha256":
+		h = crypto.SHA256
+	default:
+		return nil, fmt.Errorf("unsupported hash function: %s", c.Hash)
 	}
 
-	f := "%x"
+	if len(c.Key) == 0 {
+		return nil, errors.New("missing hmac key")
+	}
+
+	f := "Bearer %x"
 	if p, ok := params[ParamFmt]; ok {
 		f = p
 	}
@@ -135,13 +103,8 @@ var InjectHMAC RequestProcessorFactory = func(s Secret, params map[string]string
 		buf = bytes.NewReader([]byte(p))
 	}
 
-	signKey := s[SecretKeySecret]
-	if signKey == "" {
-		return nil, errors.New("missing secret")
-	}
-
 	return func(r *http.Request) error {
-		hm := hmac.New(h.New, []byte(signKey))
+		hm := hmac.New(h.New, c.Key)
 
 		if buf == nil {
 			bbuf := new(bytes.Buffer)
@@ -157,5 +120,4 @@ var InjectHMAC RequestProcessorFactory = func(s Secret, params map[string]string
 
 		return nil
 	}, nil
-
 }

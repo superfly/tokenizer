@@ -1,59 +1,98 @@
 package tokenizer
 
 import (
-	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
+
+	"golang.org/x/crypto/nacl/box"
 )
 
 var (
-	ErrNotFound      = errors.New("not found")
 	ErrNotAuthorized = errors.New("not authorized")
 	ErrBadRequest    = errors.New("bad request")
 )
 
-type SecretStore interface {
-	get(context.Context, string) (Secret, error)
+type Secret struct {
+	AuthConfig
+	ProcessorConfig
 }
 
-type Secret map[string]string
-
-const (
-	SecretKeyAuthorizer = "authorizer"
-	SecretKeyProcessor  = "processor"
-	SecretKeySecret     = "secret"
-	SecretKeyHash       = "hash"
-)
-
-func (s Secret) AuthorizeAccess(r *http.Request) error {
-	authzName := s[SecretKeyAuthorizer]
-	if authzName == "" {
-		return errors.New("secret doesn't specify authorizer type")
+func (s *Secret) Seal(sealKey string) (string, error) {
+	pubBytes, err := hex.DecodeString(sealKey)
+	if err != nil {
+		return "", err
+	}
+	if len(pubBytes) != 32 {
+		return "", fmt.Errorf("bad public key size: %d", len(pubBytes))
 	}
 
-	authz := authorizerRegistry[authzName]
-	if authz == nil {
-		return fmt.Errorf("unrecognized authorizer type: %s", authzName)
+	sj, err := json.Marshal(s)
+	if err != nil {
+		return "", nil
 	}
 
-	return authz.Authorize(r)
+	sct, err := box.SealAnonymous(nil, sj, (*[32]byte)(pubBytes), nil)
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(sct), nil
 }
 
-func (s Secret) Processor(params map[string]string) (RequestProcessor, error) {
-	factoryName := s[SecretKeyProcessor]
-	if factoryName == "" {
-		return nil, errors.New("secret doesn't specify processor type")
+func (s *Secret) MarshalJSON() ([]byte, error) {
+	ws := wireSecretNG{}
+
+	switch a := s.AuthConfig.(type) {
+	case *BearerAuthConfig:
+		ws.BearerAuthConfig = a
 	}
 
-	factory := processorFactoryRegistry[factoryName]
-	if factory == nil {
-		return nil, fmt.Errorf("unrecognized processor type: %s", factoryName)
+	switch p := s.ProcessorConfig.(type) {
+	case *InjectProcessorConfig:
+		ws.InjectProcessorConfig = p
+	case *InjectHMACProcessorConfig:
+		ws.InjectHMACProcessorConfig = p
 	}
 
-	return factory(s, params)
+	return json.Marshal(ws)
 }
 
-func (s Secret) Secret() string {
-	return s[SecretKeySecret]
+func (s *Secret) UnmarshalJSON(b []byte) error {
+	ws := wireSecretNG{}
+	if err := json.Unmarshal(b, &ws); err != nil {
+		return err
+	}
+
+	var np int
+	if ws.InjectProcessorConfig != nil {
+		np += 1
+		s.ProcessorConfig = ws.InjectProcessorConfig
+	}
+	if ws.InjectHMACProcessorConfig != nil {
+		np += 1
+		s.ProcessorConfig = ws.InjectHMACProcessorConfig
+	}
+	if np != 1 {
+		return errors.New("bad processor config")
+	}
+
+	var na int
+	if ws.BearerAuthConfig != nil {
+		na += 1
+		s.AuthConfig = ws.BearerAuthConfig
+	}
+	if na != 1 {
+		return errors.New("bad auth config")
+	}
+
+	return nil
+}
+
+type wireSecretNG struct {
+	*InjectProcessorConfig     `json:"inject-processor,omitempty"`
+	*InjectHMACProcessorConfig `json:"inject-hmac-processor,omitempty"`
+	*BearerAuthConfig          `json:"bearer-auth,omitempty"`
 }

@@ -4,15 +4,21 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/elazarl/goproxy"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/nacl/box"
 )
 
 var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
@@ -31,16 +37,28 @@ const headerProxyTokenizer = "Proxy-Tokenizer"
 
 type tokenizer struct {
 	*goproxy.ProxyHttpServer
-	secrets SecretStore
+	priv *[32]byte
+	pub  *[32]byte
 }
 
 var _ goproxy.HttpsHandler = new(tokenizer)
 var _ goproxy.ReqHandler = new(tokenizer)
 var _ http.Handler = new(tokenizer)
 
-func NewTokenizer(ss SecretStore) *tokenizer {
+func NewTokenizer(openKey string) *tokenizer {
+	privBytes, err := hex.DecodeString(openKey)
+	if err != nil {
+		logrus.WithError(err).Panic("bad private key")
+	}
+	if len(privBytes) != 32 {
+		logrus.Panicf("bad private key size: %d", len(privBytes))
+	}
+	priv := (*[32]byte)(privBytes)
+	pub := new([32]byte)
+	curve25519.ScalarBaseMult(pub, priv)
+
 	proxy := goproxy.NewProxyHttpServer()
-	tkz := &tokenizer{ProxyHttpServer: proxy, secrets: ss}
+	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub}
 
 	// fly-proxy rewrites incoming requests to not include the full URI so we
 	// have to look at the host header.
@@ -112,26 +130,32 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor
 	processors := make([]RequestProcessor, 0, len(hdrs))
 
 	for _, hdr := range hdrs {
-		secretKey, processorParams, err := parseHeaderProxyTokenizer(hdr)
+		b64Secret, params, err := parseHeaderProxyTokenizer(hdr)
 		if err != nil {
-			logrus.WithError(err).WithField("hdr", hdr).Warn("parse tokenizer header")
 			return nil, err
 		}
 
-		secret, err := t.secrets.get(req.Context(), secretKey)
+		ctSecret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Secret))
 		if err != nil {
-			logrus.WithError(err).WithField("key", secretKey).Warn("secret lookup")
-			return nil, err
+			return nil, fmt.Errorf("bad Proxy-Tokenizer encoding: %w", err)
 		}
 
-		if err := secret.AuthorizeAccess(req); err != nil {
-			logrus.WithError(err).Warn("failed authz")
-			return nil, err
+		jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, t.pub, t.priv)
+		if !ok {
+			return nil, errors.New("failed Proxy-Tokenizer decryption")
 		}
 
-		processor, err := secret.Processor(processorParams)
+		secret := new(Secret)
+		if err = json.Unmarshal(jsonSecret, secret); err != nil {
+			return nil, fmt.Errorf("bad secret json: %w", err)
+		}
+
+		if err = secret.AuthRequest(req); err != nil {
+			return nil, fmt.Errorf("unauthorized to use secret: %w", err)
+		}
+
+		processor, err := secret.Processor(params)
 		if err != nil {
-			logrus.WithError(err).Warn("processor lookup")
 			return nil, err
 		}
 
@@ -141,11 +165,40 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor
 	return processors, nil
 }
 
+func parseHeaderProxyTokenizer(hdr string) (string, map[string]string, error) {
+	b64Secret, paramJSON, _ := strings.Cut(hdr, ";")
+
+	b64Secret = strings.TrimFunc(b64Secret, unicode.IsSpace)
+	paramJSON = strings.TrimFunc(paramJSON, unicode.IsSpace)
+
+	if b64Secret == "" {
+		return "", nil, fmt.Errorf("%w: bad tokenizer header", ErrBadRequest)
+	}
+
+	processorParams := make(map[string]string)
+	if paramJSON != "" {
+		if err := json.Unmarshal([]byte(paramJSON), &processorParams); err != nil {
+			return "", nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
+		}
+	}
+
+	return b64Secret, processorParams, nil
+}
+
+func formatHeaderProxyTokenizer(b64Secret string, processorParams map[string]string) string {
+	hdr := b64Secret
+
+	if len(processorParams) > 0 {
+		paramJSON, _ := json.Marshal(processorParams)
+		hdr = fmt.Sprintf("%s; %s", hdr, paramJSON)
+	}
+
+	return hdr
+}
+
 func errorResponse(err error) *http.Response {
 	status := http.StatusBadGateway
 	switch {
-	case errors.Is(err, ErrNotFound):
-		status = http.StatusNotFound
 	case errors.Is(err, ErrNotAuthorized):
 		status = http.StatusProxyAuthRequired
 	case errors.Is(err, ErrBadRequest):

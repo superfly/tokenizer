@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/tokenizer"
-	_ "github.com/superfly/tokenizer/processors/inject"
 )
 
 func init() {
@@ -31,33 +29,6 @@ func init() {
 }
 
 func main() {
-	ssAuth := os.Getenv("SHARED_SECRET_DIGEST")
-	if ssAuth == "" {
-		logrus.Fatal("missing SHARED_SECRET_DIGEST environment variable")
-	}
-	tokenizer.RegisterSharedSecretAuthorizer("secret", ssAuth)
-
-	var ss tokenizer.SecretStore
-	if ssJSON := os.Getenv("SECRET_STORE"); ssJSON != "" {
-		if ssJSON == "" {
-			logrus.Fatal("missing SECRET_STORE environment variable")
-		}
-
-		sss := make(tokenizer.StaticSecretStore)
-		if err := json.Unmarshal([]byte(ssJSON), &sss); err != nil {
-			logrus.WithError(err).Fatal("parsing SECRET_STORE environment variable")
-		}
-
-		ss = sss
-	} else {
-		vault, err := vaultInfraLoginFromEnv()
-		if err != nil {
-			logrus.Fatal(err)
-		}
-
-		ss = tokenizer.VaultSecretStore(vault)
-	}
-
 	// specify port for local dev
 	addr := ":8080"
 	if port := os.Getenv("PORT"); port != "" {
@@ -71,7 +42,7 @@ func main() {
 
 	l = debugListener{l}
 
-	tkz := tokenizer.NewTokenizer(ss)
+	tkz := tokenizer.NewTokenizer(os.Getenv("OPEN_KEY"))
 	tkz.ProxyHttpServer.Verbose = true
 
 	server := &http.Server{Addr: addr, Handler: tkz}

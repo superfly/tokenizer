@@ -24,8 +24,8 @@ func init() {
 
 type ClientOption http.Header
 
-func WithSecret(key string, params map[string]string) ClientOption {
-	return ClientOption(http.Header{headerProxyTokenizer: {formatHeaderProxyTokenizer(key, params)}})
+func WithSecret(sealedSecret string, params map[string]string) ClientOption {
+	return ClientOption(http.Header{headerProxyTokenizer: {formatHeaderProxyTokenizer(sealedSecret, params)}})
 }
 
 func WithAuth(auth string) ClientOption {
@@ -43,13 +43,11 @@ func Client(proxyURL string, opts ...ClientOption) (*http.Client, error) {
 		mergeHeader(hdrs, o)
 	}
 
-	var t http.RoundTripper
-	t = &http.Transport{
+	t := headerInjector(&http.Transport{
 		Proxy:             http.ProxyURL(u),
 		TLSClientConfig:   &tls.Config{RootCAs: downstreamTrust},
 		ForceAttemptHTTP2: true,
-	}
-	t = headerInjector(t, hdrs)
+	}, hdrs)
 
 	return &http.Client{Transport: t}, nil
 }
