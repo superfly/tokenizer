@@ -18,7 +18,7 @@ type AuthConfig interface {
 }
 
 type BearerAuthConfig struct {
-	Digest []byte `json:"bearer-digest"`
+	Digest []byte `json:"digest"`
 }
 
 func NewBearerAuthConfig(token string) *BearerAuthConfig {

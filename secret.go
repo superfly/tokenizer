@@ -42,12 +42,20 @@ func (s *Secret) Seal(sealKey string) (string, error) {
 	return base64.StdEncoding.EncodeToString(sct), nil
 }
 
+type wireSecret struct {
+	*InjectProcessorConfig     `json:"inject_processor,omitempty"`
+	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
+	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
+}
+
 func (s *Secret) MarshalJSON() ([]byte, error) {
-	ws := wireSecretNG{}
+	ws := wireSecret{}
 
 	switch a := s.AuthConfig.(type) {
 	case *BearerAuthConfig:
 		ws.BearerAuthConfig = a
+	default:
+		return nil, errors.New("bad auth config")
 	}
 
 	switch p := s.ProcessorConfig.(type) {
@@ -55,13 +63,15 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 		ws.InjectProcessorConfig = p
 	case *InjectHMACProcessorConfig:
 		ws.InjectHMACProcessorConfig = p
+	default:
+		return nil, errors.New("bad processor config")
 	}
 
 	return json.Marshal(ws)
 }
 
 func (s *Secret) UnmarshalJSON(b []byte) error {
-	ws := wireSecretNG{}
+	ws := wireSecret{}
 	if err := json.Unmarshal(b, &ws); err != nil {
 		return err
 	}
@@ -89,10 +99,4 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	}
 
 	return nil
-}
-
-type wireSecretNG struct {
-	*InjectProcessorConfig     `json:"inject-processor,omitempty"`
-	*InjectHMACProcessorConfig `json:"inject-hmac-processor,omitempty"`
-	*BearerAuthConfig          `json:"bearer-auth,omitempty"`
 }
