@@ -72,7 +72,13 @@ func NewTokenizer(openKey string) *tokenizer {
 		tkz.ServeHTTP(w, r)
 	})
 
-	proxy.Tr = &http.Transport{Dial: forceTLSDialer}
+	proxy.Tr = &http.Transport{
+		Dial: forceTLSDialer,
+		// probably not necessary, but I don't want to worry about desync/smuggling
+		DisableKeepAlives: true,
+	}
+	proxy.ConnectDial = nil
+	proxy.ConnectDialWithReq = nil
 	proxy.OnRequest().HandleConnect(tkz)
 	proxy.OnRequest().Do(tkz)
 
@@ -213,10 +219,13 @@ func forceTLSDialer(network, addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
 	}
 	hostname, port, _ := strings.Cut(addr, ":")
+	if hostname == "" {
+		return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
+	}
 	switch port {
 	case "443":
 		return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
-	case "80":
+	case "80", "":
 		port = "443"
 	}
 	addr = fmt.Sprintf("%s:%s", hostname, port)

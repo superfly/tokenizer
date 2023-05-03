@@ -213,6 +213,7 @@ var echo http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Req
 	r.Header.Del("User-Agent")
 	r.Header.Del("Accept-Encoding")
 	r.Header.Del("Content-Length")
+	r.Header.Del("Connection")
 	if err := json.NewEncoder(w).Encode(&echoResponse{Headers: r.Header, Body: string(body)}); err != nil {
 		logrus.WithError(err).Panicf("failed writing response")
 	}
