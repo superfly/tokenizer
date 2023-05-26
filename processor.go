@@ -153,7 +153,7 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 			return kid, nil
 		})
 
-		sig, err := signer.Sign(context.Background(), si, r)
+		sig, err := signer.Sign(r.Context(), si, r)
 		if err != nil {
 			return err
 		}
