@@ -140,21 +140,21 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 		return nil, errors.New("missing signing key")
 	}
 
-	// Prepare a signature-input
-	si := &httpsig.SignatureInput{
-		ID:      "signature",
-		KeyID:   string(c.Key),
-		Headers: []string{"@created", "@request-target", "content-length"},
-		Created: uint64(time.Now().Unix()),
-		Nonce:   RandHex(32),
-	}
-
 	return func(r *http.Request) error {
 		signer := httpsig.NewSigner(httpsig.AlgorithmHMACSHA256, func(ctx context.Context, kid string) (interface{}, error) {
-			return kid, nil
+			return c.Key, nil
 		})
 
 		sig, err := signer.Sign(r.Context(), si, r)
+		si := &httpsig.SignatureInput{
+			ID:      "signature",
+			KeyID:   "key",
+			Headers: []string{"@created", "@request-target", "content-length"},
+			Created: uint64(time.Now().Unix()),
+			Nonce:   RandHex(32),
+		}
+
+		sig, err = signer.Sign(r.Context(), si, r)
 		if err != nil {
 			return err
 		}
