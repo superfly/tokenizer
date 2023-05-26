@@ -145,7 +145,6 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 			return c.Key, nil
 		})
 
-		sig, err := signer.Sign(r.Context(), si, r)
 		si := &httpsig.SignatureInput{
 			ID:      "signature",
 			KeyID:   "key",
@@ -154,10 +153,12 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 			Nonce:   RandHex(32),
 		}
 
-		sig, err = signer.Sign(r.Context(), si, r)
+		sig, err := signer.Sign(r.Context(), si, r)
+
 		if err != nil {
 			return err
 		}
+
 		signSet := &httpsig.SignatureSet{}
 		signSet.Add(si.ID, sig)
 
