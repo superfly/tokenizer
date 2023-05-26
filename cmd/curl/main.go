@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/url"
@@ -58,7 +56,7 @@ func doCurl(url string) {
 func doGenerateSecret(secretToken string) {
 	var (
 		sealKey   = mustGetEnv("SEAL_KEY")
-		authToken = randHex(8)
+		authToken = tokenizer.RandHex(8)
 		secret    = &tokenizer.Secret{
 			AuthConfig:      tokenizer.NewBearerAuthConfig(authToken),
 			ProcessorConfig: &tokenizer.InjectProcessorConfig{Token: secretToken},
@@ -94,12 +92,4 @@ func fatalln(args ...any) {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format, args...)
 	os.Exit(1)
-}
-
-func randHex(n int) string {
-	b := make([]byte, n)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b)
 }

@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto"
 	"crypto/hmac"
+	"crypto/rand"
 	_ "crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dchest/uniuri"
 	"github.com/superfly/httpsig"
 )
 
@@ -145,7 +146,7 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 		KeyID:   string(c.Key),
 		Headers: []string{"@created", "@request-target", "content-length"},
 		Created: uint64(time.Now().Unix()),
-		Nonce:   uniuri.NewLen(32),
+		Nonce:   RandHex(32),
 	}
 
 	return func(r *http.Request) error {
@@ -166,4 +167,12 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 
 		return nil
 	}, nil
+}
+
+func RandHex(n int) string {
+	b := make([]byte, n)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
