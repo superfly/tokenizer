@@ -2,6 +2,7 @@ package tokenizer
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/hmac"
 	_ "crypto/sha256"
@@ -10,6 +11,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/dchest/uniuri"
+	"github.com/superfly/httpsig"
 )
 
 const (
@@ -117,6 +122,47 @@ func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (Request
 		}
 
 		r.Header.Set(dst, fmt.Sprintf(f, hm.Sum(nil)))
+
+		return nil
+	}, nil
+}
+
+type InjectHttpsigProcessorConfig struct {
+	Key []byte `json:"key"`
+}
+
+var _ ProcessorConfig = new(InjectHMACProcessorConfig)
+
+func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+
+	if len(c.Key) == 0 {
+		return nil, errors.New("missing signing key")
+	}
+
+	// Prepare a signature-input
+	si := &httpsig.SignatureInput{
+		ID:      "signature",
+		KeyID:   string(c.Key),
+		Headers: []string{"@created", "@request-target", "content-length"},
+		Created: uint64(time.Now().Unix()),
+		Nonce:   uniuri.NewLen(32),
+	}
+
+	return func(r *http.Request) error {
+		signer := httpsig.NewSigner(httpsig.AlgorithmHMACSHA256, func(ctx context.Context, kid string) (interface{}, error) {
+			return kid, nil
+		})
+
+		sig, err := signer.Sign(context.Background(), si, r)
+		if err != nil {
+			return err
+		}
+		signSet := &httpsig.SignatureSet{}
+		signSet.Add(si.ID, sig)
+
+		// Assign to request headers.
+		r.Header.Set("Signature-Input", si.String())
+		r.Header.Set("Signature", signSet.String())
 
 		return nil
 	}, nil
