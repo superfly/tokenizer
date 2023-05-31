@@ -132,10 +132,9 @@ type InjectHttpsigProcessorConfig struct {
 	Key []byte `json:"key"`
 }
 
-var _ ProcessorConfig = new(InjectHMACProcessorConfig)
+var _ ProcessorConfig = new(InjectHttpsigProcessorConfig)
 
 func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
-
 	if len(c.Key) == 0 {
 		return nil, errors.New("missing signing key")
 	}
@@ -146,26 +145,23 @@ func (c *InjectHttpsigProcessorConfig) Processor(params map[string]string) (Requ
 		})
 
 		si := &httpsig.SignatureInput{
-			ID:      "signature",
-			KeyID:   "key",
-			Headers: []string{"@created", "@request-target", "content-length"},
+			ID:    "signature",
+			KeyID: "v1",
+			//Headers: []string{"@created", "@request-target", "content-length"},
 			Created: uint64(time.Now().Unix()),
 			Nonce:   RandHex(32),
 		}
 
 		sig, err := signer.Sign(r.Context(), si, r)
-
 		if err != nil {
 			return err
 		}
 
 		signSet := &httpsig.SignatureSet{}
 		signSet.Add(si.ID, sig)
-
 		// Assign to request headers.
 		r.Header.Set("Signature-Input", si.String())
 		r.Header.Set("Signature", signSet.String())
-
 		return nil
 	}, nil
 }

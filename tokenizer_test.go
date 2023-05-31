@@ -45,6 +45,11 @@ func TestTokenizer(t *testing.T) {
 	sih, err := (&Secret{AuthConfig: NewBearerAuthConfig(sihAuth), ProcessorConfig: &InjectHMACProcessorConfig{Key: sihKey, Hash: "sha256"}}).Seal(sealKey)
 	assert.NoError(t, err)
 
+	sigAuth := "secretest"
+	sigKey := []byte("trustno2")
+	sig, err := (&Secret{AuthConfig: NewBearerAuthConfig(sigAuth), ProcessorConfig: &InjectHttpsigProcessorConfig{Key: sigKey}}).Seal(sealKey)
+	assert.NoError(t, err)
+
 	tkz := NewTokenizer(openKey)
 	tkz.ProxyHttpServer.Verbose = true
 
@@ -157,6 +162,23 @@ func TestTokenizer(t *testing.T) {
 		Body:    "foo",
 	}, doEcho(t, client, req))
 
+	// InjectHttpsig
+	client, err = Client(tkzServer.URL, WithAuth(sigAuth), WithSecret(sig, nil))
+	assert.NoError(t, err)
+	req.Body = io.NopCloser(bytes.NewReader([]byte("foo")))
+	reply := doEcho(t, client, req)
+
+	value := reply.Headers.Get("Signature")
+	if value == "" {
+		t.Errorf("Expected header 'Signature' to exist")
+	}
+
+	value = reply.Headers.Get("Signature-Input")
+
+	if value == "" {
+		t.Errorf("Expected header 'Signature-Input' to exist")
+	}
+
 	// good auth + bad auth
 	client, err = Client(tkzServer.URL, WithAuth(siAuth), WithSecret(si, nil), WithAuth("bogus"))
 	assert.NoError(t, err)
@@ -191,12 +213,6 @@ func TestTokenizer(t *testing.T) {
 		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", siToken)}},
 		Body:    "",
 	}, doEcho(t, client, req))
-}
-
-func randomName(prefix string) string {
-	rawName := make([]byte, 8)
-	io.ReadFull(rand.Reader, rawName)
-	return fmt.Sprintf("%s-%x", prefix, rawName)
 }
 
 type echoResponse struct {
