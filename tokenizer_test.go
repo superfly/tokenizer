@@ -25,6 +25,13 @@ func TestTokenizer(t *testing.T) {
 	appServer := httptest.NewTLSServer(echo)
 	defer appServer.Close()
 
+	u, err := url.Parse(appServer.URL)
+	assert.NoError(t, err)
+	u.Scheme = "http"
+	appURL := u.String()
+	appHost := u.Host
+	appPort := u.Port()
+
 	var (
 		pub, priv, _ = box.GenerateKey(rand.Reader)
 		sealKey      = hex.EncodeToString(pub[:])
@@ -45,6 +52,11 @@ func TestTokenizer(t *testing.T) {
 	sih, err := (&Secret{AuthConfig: NewBearerAuthConfig(sihAuth), ProcessorConfig: &InjectHMACProcessorConfig{Key: sihKey, Hash: "sha256"}}).Seal(sealKey)
 	assert.NoError(t, err)
 
+	rhAuth := "require-host auth"
+	rhToken := "require-host secret"
+	srh, err := (&Secret{AuthConfig: NewBearerAuthConfig(rhAuth), ProcessorConfig: &InjectProcessorConfig{rhToken}, RequestValidators: []RequestValidator{AllowHosts(appHost)}}).Seal(sealKey)
+	assert.NoError(t, err)
+
 	tkz := NewTokenizer(openKey)
 	tkz.ProxyHttpServer.Verbose = true
 
@@ -53,11 +65,6 @@ func TestTokenizer(t *testing.T) {
 
 	client, err := Client(tkzServer.URL)
 	assert.NoError(t, err)
-
-	u, err := url.Parse(appServer.URL)
-	assert.NoError(t, err)
-	u.Scheme = "http"
-	appURL := u.String()
 
 	req, err := http.NewRequest(http.MethodPost, appURL, nil)
 	assert.NoError(t, err)
@@ -171,6 +178,24 @@ func TestTokenizer(t *testing.T) {
 	resp, err = client.Do(req)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+
+	// allowed hosts - good
+	client, err = Client(tkzServer.URL, WithAuth(rhAuth), WithSecret(srh, nil))
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", rhToken)}},
+		Body:    "",
+	}, doEcho(t, client, req))
+
+	// allowed hosts - good
+	badHostReq, err := http.NewRequest(http.MethodPost, "http://127.0.0.1.nip.io:"+appPort, nil)
+	assert.NoError(t, err)
+	badHostReq.URL.Host = "127.0.0.1.nip.io:" + badHostReq.URL.Port()
+	client, err = Client(tkzServer.URL, WithAuth(rhAuth), WithSecret(srh, nil))
+	assert.NoError(t, err)
+	resp, err = client.Do(badHostReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
 	// CONNECT proxy
 	conn, err := net.Dial("tcp", tkzServer.Listener.Addr().String())

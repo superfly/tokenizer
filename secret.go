@@ -18,6 +18,7 @@ var (
 type Secret struct {
 	AuthConfig
 	ProcessorConfig
+	RequestValidators []RequestValidator
 }
 
 func (s *Secret) Seal(sealKey string) (string, error) {
@@ -46,6 +47,7 @@ type wireSecret struct {
 	*InjectProcessorConfig     `json:"inject_processor,omitempty"`
 	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
+	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
 }
 
 func (s *Secret) MarshalJSON() ([]byte, error) {
@@ -65,6 +67,18 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 		ws.InjectHMACProcessorConfig = p
 	default:
 		return nil, errors.New("bad processor config")
+	}
+
+	for _, v := range s.RequestValidators {
+		switch tv := v.(type) {
+		case allowedHosts:
+			if ws.AllowHosts != nil {
+				return nil, errors.New("cannot have multiple AllowedHosts validators")
+			}
+			ws.AllowHosts = tv.slice()
+		default:
+			return nil, errors.New("unknown request validator type")
+		}
 	}
 
 	return json.Marshal(ws)
@@ -96,6 +110,10 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	}
 	if na != 1 {
 		return errors.New("bad auth config")
+	}
+
+	if ws.AllowHosts != nil {
+		s.RequestValidators = append(s.RequestValidators, AllowHosts(ws.AllowHosts...))
 	}
 
 	return nil

@@ -160,6 +160,12 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor
 			return nil, fmt.Errorf("unauthorized to use secret: %w", err)
 		}
 
+		for _, v := range secret.RequestValidators {
+			if err := v.Validate(req); err != nil {
+				return nil, fmt.Errorf("request validator failed: %w", err)
+			}
+		}
+
 		processor, err := secret.Processor(params)
 		if err != nil {
 			return nil, err
