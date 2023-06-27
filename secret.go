@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"golang.org/x/crypto/nacl/box"
 )
@@ -48,6 +49,7 @@ type wireSecret struct {
 	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
 	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
+	AllowHostPattern           string   `json:"allowed_host_pattern,omitempty"`
 }
 
 func (s *Secret) MarshalJSON() ([]byte, error) {
@@ -76,6 +78,8 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 				return nil, errors.New("cannot have multiple AllowedHosts validators")
 			}
 			ws.AllowHosts = tv.slice()
+		case *allowedHostPattern:
+			ws.AllowHostPattern = (*regexp.Regexp)(tv).String()
 		default:
 			return nil, errors.New("unknown request validator type")
 		}
@@ -114,6 +118,14 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 
 	if ws.AllowHosts != nil {
 		s.RequestValidators = append(s.RequestValidators, AllowHosts(ws.AllowHosts...))
+	}
+
+	if ws.AllowHostPattern != "" {
+		re, err := regexp.Compile(ws.AllowHostPattern)
+		if err != nil {
+			return err
+		}
+		s.RequestValidators = append(s.RequestValidators, AllowHostPattern(re))
 	}
 
 	return nil

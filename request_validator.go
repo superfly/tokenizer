@@ -3,6 +3,7 @@ package tokenizer
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 
 	"golang.org/x/exp/maps"
 )
@@ -32,4 +33,19 @@ func (v allowedHosts) Validate(r *http.Request) error {
 
 func (v allowedHosts) slice() []string {
 	return maps.Keys(v)
+}
+
+type allowedHostPattern regexp.Regexp
+
+var _ RequestValidator = (*allowedHostPattern)(nil)
+
+func AllowHostPattern(pattern *regexp.Regexp) RequestValidator {
+	return (*allowedHostPattern)(pattern)
+}
+
+func (v *allowedHostPattern) Validate(r *http.Request) error {
+	if match := (*regexp.Regexp)(v).MatchString(r.URL.Host); !match {
+		return fmt.Errorf("%w: secret not valid for %s", ErrBadRequest, r.URL.Host)
+	}
+	return nil
 }

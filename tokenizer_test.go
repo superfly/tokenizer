@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
@@ -52,9 +53,14 @@ func TestTokenizer(t *testing.T) {
 	sih, err := (&Secret{AuthConfig: NewBearerAuthConfig(sihAuth), ProcessorConfig: &InjectHMACProcessorConfig{Key: sihKey, Hash: "sha256"}}).Seal(sealKey)
 	assert.NoError(t, err)
 
-	rhAuth := "require-host auth"
-	rhToken := "require-host secret"
-	srh, err := (&Secret{AuthConfig: NewBearerAuthConfig(rhAuth), ProcessorConfig: &InjectProcessorConfig{rhToken}, RequestValidators: []RequestValidator{AllowHosts(appHost)}}).Seal(sealKey)
+	ahAuth := "allow-host auth"
+	ahToken := "allow-host secret"
+	sah, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahAuth), ProcessorConfig: &InjectProcessorConfig{ahToken}, RequestValidators: []RequestValidator{AllowHosts(appHost)}}).Seal(sealKey)
+	assert.NoError(t, err)
+
+	ahpAuth := "allow-host-pattern auth"
+	ahpToken := "allow-host-pattern secret"
+	sahp, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahpAuth), ProcessorConfig: &InjectProcessorConfig{ahpToken}, RequestValidators: []RequestValidator{AllowHostPattern(regexp.MustCompile("^" + appHost + "$"))}}).Seal(sealKey)
 	assert.NoError(t, err)
 
 	tkz := NewTokenizer(openKey)
@@ -180,18 +186,36 @@ func TestTokenizer(t *testing.T) {
 	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 
 	// allowed hosts - good
-	client, err = Client(tkzServer.URL, WithAuth(rhAuth), WithSecret(srh, nil))
+	client, err = Client(tkzServer.URL, WithAuth(ahAuth), WithSecret(sah, nil))
 	assert.NoError(t, err)
 	assert.Equal(t, &echoResponse{
-		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", rhToken)}},
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", ahToken)}},
 		Body:    "",
 	}, doEcho(t, client, req))
 
-	// allowed hosts - good
+	// allowed hosts - bad
 	badHostReq, err := http.NewRequest(http.MethodPost, "http://127.0.0.1.nip.io:"+appPort, nil)
 	assert.NoError(t, err)
 	badHostReq.URL.Host = "127.0.0.1.nip.io:" + badHostReq.URL.Port()
-	client, err = Client(tkzServer.URL, WithAuth(rhAuth), WithSecret(srh, nil))
+	client, err = Client(tkzServer.URL, WithAuth(ahAuth), WithSecret(sah, nil))
+	assert.NoError(t, err)
+	resp, err = client.Do(badHostReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	// allowed host pattern - good
+	client, err = Client(tkzServer.URL, WithAuth(ahpAuth), WithSecret(sahp, nil))
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", ahpToken)}},
+		Body:    "",
+	}, doEcho(t, client, req))
+
+	// allowed host pattern - bad
+	badHostReq, err = http.NewRequest(http.MethodPost, "http://127.0.0.1.nip.io:"+appPort, nil)
+	assert.NoError(t, err)
+	badHostReq.URL.Host = "127.0.0.1.nip.io:" + badHostReq.URL.Port()
+	client, err = Client(tkzServer.URL, WithAuth(ahpAuth), WithSecret(sahp, nil))
 	assert.NoError(t, err)
 	resp, err = client.Do(badHostReq)
 	assert.NoError(t, err)
