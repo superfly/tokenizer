@@ -39,10 +39,6 @@ func TestTokenizer(t *testing.T) {
 		openKey      = hex.EncodeToString(priv[:])
 	)
 
-	// t.Log(sealKey)
-	// t.Log(openKey)
-	// t.Fatal()
-
 	siAuth := "trustno1"
 	siToken := "supersecret"
 	si, err := (&Secret{AuthConfig: NewBearerAuthConfig(siAuth), ProcessorConfig: &InjectProcessorConfig{siToken}}).Seal(sealKey)

@@ -14,6 +14,7 @@ import (
 var (
 	ErrNotAuthorized = errors.New("not authorized")
 	ErrBadRequest    = errors.New("bad request")
+	ErrInternal      = errors.New("internal proxy error")
 )
 
 type Secret struct {
@@ -31,12 +32,16 @@ func (s *Secret) Seal(sealKey string) (string, error) {
 		return "", fmt.Errorf("bad public key size: %d", len(pubBytes))
 	}
 
+	return s.sealRaw((*[32]byte)(pubBytes))
+}
+
+func (s *Secret) sealRaw(key *[32]byte) (string, error) {
 	sj, err := json.Marshal(s)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 
-	sct, err := box.SealAnonymous(nil, sj, (*[32]byte)(pubBytes), nil)
+	sct, err := box.SealAnonymous(nil, sj, key, nil)
 	if err != nil {
 		return "", err
 	}
@@ -47,6 +52,7 @@ func (s *Secret) Seal(sealKey string) (string, error) {
 type wireSecret struct {
 	*InjectProcessorConfig     `json:"inject_processor,omitempty"`
 	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
+	*OAuth2ProcessorConfig     `json:"oauth2_processor,omitempty"`
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
 	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
 	AllowHostPattern           string   `json:"allowed_host_pattern,omitempty"`
@@ -67,6 +73,8 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 		ws.InjectProcessorConfig = p
 	case *InjectHMACProcessorConfig:
 		ws.InjectHMACProcessorConfig = p
+	case *OAuth2ProcessorConfig:
+		ws.OAuth2ProcessorConfig = p
 	default:
 		return nil, errors.New("bad processor config")
 	}
@@ -102,6 +110,10 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	if ws.InjectHMACProcessorConfig != nil {
 		np += 1
 		s.ProcessorConfig = ws.InjectHMACProcessorConfig
+	}
+	if ws.OAuth2ProcessorConfig != nil {
+		np += 1
+		s.ProcessorConfig = ws.OAuth2ProcessorConfig
 	}
 	if np != 1 {
 		return errors.New("bad processor config")
