@@ -29,9 +29,11 @@ const (
 )
 
 type RequestProcessor func(r *http.Request) error
+type ResponseProcessor func(r *http.Response) error
 
 type ProcessorConfig interface {
-	Processor(map[string]string) (RequestProcessor, error)
+	RequestProcessor(map[string]string) (RequestProcessor, error)
+	Updated() bool
 }
 
 type InjectProcessorConfig struct {
@@ -40,7 +42,7 @@ type InjectProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectProcessorConfig)
 
-func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *InjectProcessorConfig) RequestProcessor(params map[string]string) (RequestProcessor, error) {
 	f := "Bearer %s"
 	if p, ok := params[ParamFmt]; ok {
 		f = p
@@ -65,6 +67,8 @@ func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProc
 	}, nil
 }
 
+func (c *InjectProcessorConfig) Updated() bool { return false }
+
 type InjectHMACProcessorConfig struct {
 	Key  []byte `json:"key"`
 	Hash string `json:"hash"`
@@ -72,7 +76,7 @@ type InjectHMACProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectHMACProcessorConfig)
 
-func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *InjectHMACProcessorConfig) RequestProcessor(params map[string]string) (RequestProcessor, error) {
 	var h crypto.Hash
 	switch c.Hash {
 	case "sha256":
@@ -121,3 +125,5 @@ func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (Request
 		return nil
 	}, nil
 }
+
+func (c *InjectHMACProcessorConfig) Updated() bool { return false }

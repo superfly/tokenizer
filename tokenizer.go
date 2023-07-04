@@ -42,7 +42,8 @@ type tokenizer struct {
 }
 
 var _ goproxy.HttpsHandler = new(tokenizer)
-var _ goproxy.ReqHandler = new(tokenizer)
+var _ goproxy.FuncReqHandler = new(tokenizer).HandleReq
+var _ goproxy.FuncRespHandler = new(tokenizer).HandleResp
 var _ http.Handler = new(tokenizer)
 
 func NewTokenizer(openKey string) *tokenizer {
@@ -80,9 +81,20 @@ func NewTokenizer(openKey string) *tokenizer {
 	proxy.ConnectDial = nil
 	proxy.ConnectDialWithReq = nil
 	proxy.OnRequest().HandleConnect(tkz)
-	proxy.OnRequest().Do(tkz)
+	proxy.OnRequest().Do(goproxy.FuncReqHandler(tkz.HandleReq))
+	proxy.OnResponse().Do(goproxy.FuncRespHandler(tkz.HandleResp))
 
 	return tkz
+}
+
+type proxyCtx struct {
+	reqProcessors  []RequestProcessor
+	respProcessors []ResponseProcessor
+}
+
+func (pctx *proxyCtx) merge(other *proxyCtx) {
+	pctx.reqProcessors = append(pctx.reqProcessors, other.reqProcessors...)
+	pctx.respProcessors = append(pctx.respProcessors, other.respProcessors...)
 }
 
 // HandleConnect implements goproxy.HttpsHandler
@@ -90,37 +102,36 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 	_, port, _ := strings.Cut(host, ":")
 	if port == "443" {
 		logrus.WithField("host", host).Warn("attempt to proxy to https downstream")
-		ctx.Resp = &http.Response{StatusCode: http.StatusBadRequest}
+		ctx.Resp = errorResponse(ErrBadRequest)
 		return goproxy.RejectConnect, ""
 	}
 
-	processors, err := t.processorsFromRequest(ctx.Req)
+	pctx, err := t.processorsFromRequest(ctx.Req)
 	if err != nil {
 		ctx.Resp = errorResponse(err)
 		return goproxy.RejectConnect, ""
 	}
 
-	ctx.UserData = processors
+	ctx.UserData = pctx
 	return goproxy.HTTPMitmConnect, host
 }
 
-// Handle implements goproxy.ReqHandler
-func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	var processors []RequestProcessor
-	if ctx.UserData != nil {
-		processors = ctx.UserData.([]RequestProcessor)
+// Handle implements goproxy.FuncReqHandler
+func (t *tokenizer) HandleReq(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	if ctx.UserData == nil {
+		ctx.UserData = new(proxyCtx)
 	}
 
-	if reqProcessors, err := t.processorsFromRequest(req); err != nil {
+	reqPctx, err := t.processorsFromRequest(req)
+	if err != nil {
 		return req, errorResponse(err)
-	} else {
-		processors = append(processors, reqProcessors...)
 	}
+	ctx.UserData.(*proxyCtx).merge(reqPctx)
 
-	for _, processor := range processors {
+	for _, processor := range ctx.UserData.(*proxyCtx).reqProcessors {
 		if err := processor(req); err != nil {
 			logrus.WithError(err).Warn("run processor")
-			return nil, &http.Response{StatusCode: http.StatusBadRequest}
+			return nil, errorResponse(ErrBadRequest)
 		}
 	}
 
@@ -131,9 +142,26 @@ func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Requ
 	return req, nil
 }
 
-func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, error) {
-	hdrs := req.Header[headerProxyTokenizer]
-	processors := make([]RequestProcessor, 0, len(hdrs))
+func (t *tokenizer) HandleResp(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	if resp == nil {
+		return resp
+	}
+
+	for _, processor := range ctx.UserData.(*proxyCtx).respProcessors {
+		if err := processor(resp); err != nil {
+			logrus.WithError(err).Warn("response processor")
+			return errorResponse(ErrInternal)
+		}
+	}
+
+	return resp
+}
+
+func (t *tokenizer) processorsFromRequest(req *http.Request) (*proxyCtx, error) {
+	var (
+		hdrs = req.Header[headerProxyTokenizer]
+		pctx = new(proxyCtx)
+	)
 
 	for _, hdr := range hdrs {
 		b64Secret, params, err := parseHeaderProxyTokenizer(hdr)
@@ -160,15 +188,34 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor
 			return nil, fmt.Errorf("unauthorized to use secret: %w", err)
 		}
 
-		processor, err := secret.Processor(params)
+		for _, v := range secret.RequestValidators {
+			if err := v.Validate(req); err != nil {
+				return nil, fmt.Errorf("request validator failed: %w", err)
+			}
+		}
+
+		reqProcessor, err := secret.RequestProcessor(params)
 		if err != nil {
 			return nil, err
 		}
+		if reqProcessor != nil {
+			pctx.reqProcessors = append(pctx.reqProcessors, reqProcessor)
+		}
 
-		processors = append(processors, processor)
+		pctx.respProcessors = append(pctx.respProcessors, func(r *http.Response) error {
+			if secret.Updated() {
+				sealed, err := secret.sealRaw(t.pub)
+				if err != nil {
+					return err
+				}
+				r.Header.Set(headerProxyTokenizer, sealed)
+			}
+			return nil
+		})
+
 	}
 
-	return processors, nil
+	return pctx, nil
 }
 
 func parseHeaderProxyTokenizer(hdr string) (string, map[string]string, error) {
@@ -209,6 +256,8 @@ func errorResponse(err error) *http.Response {
 		status = http.StatusProxyAuthRequired
 	case errors.Is(err, ErrBadRequest):
 		status = http.StatusBadRequest
+	case errors.Is(err, ErrInternal):
+		status = http.StatusBadGateway
 	}
 
 	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader([]byte(err.Error())))}
