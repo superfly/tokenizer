@@ -82,3 +82,21 @@ secret = {
     }
 }
 ```
+
+## Host allowlist
+
+If a client is fully compromised, the attacker could send encrypted secrets via tokenizer to a service that simply echoes back the request. This way, the attacker could learn the plaintext value of the secret. To mitigate against this, secrets can specify which hosts they may be used against. 
+
+```ruby
+secret = {
+    inject_processor: {
+        token: "my-stripe-api-token"
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    },
+    allowed_hosts: ["api.stripe.com"],
+    # or
+    # allowed_host_pattern: ".*\.stripe\.com$"
+}
+```
