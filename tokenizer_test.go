@@ -49,6 +49,11 @@ func TestTokenizer(t *testing.T) {
 	sih, err := (&Secret{AuthConfig: NewBearerAuthConfig(sihAuth), ProcessorConfig: &InjectHMACProcessorConfig{Key: sihKey, Hash: "sha256"}}).Seal(sealKey)
 	assert.NoError(t, err)
 
+	soAuth := "secret-oauth-auth"
+	soToken := &OAuthToken{AccessToken: "access-token", RefreshToken: "refresh-token"}
+	so, err := (&Secret{AuthConfig: NewBearerAuthConfig(soAuth), ProcessorConfig: &OAuthProcessorConfig{soToken}}).Seal(sealKey)
+	assert.NoError(t, err)
+
 	ahAuth := "allow-host auth"
 	ahToken := "allow-host secret"
 	sah, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahAuth), ProcessorConfig: &InjectProcessorConfig{ahToken}, RequestValidators: []RequestValidator{AllowHosts(appHost)}}).Seal(sealKey)
@@ -164,6 +169,30 @@ func TestTokenizer(t *testing.T) {
 	assert.Equal(t, &echoResponse{
 		Headers: http.Header{"Authorization": {fmt.Sprintf("%X", hmacSHA256(t, sihKey, "foo"))}},
 		Body:    "foo",
+	}, doEcho(t, client, req))
+
+	// OAuth - access token (implicit)
+	client, err = Client(tkzServer.URL, WithAuth(soAuth), WithSecret(so, nil))
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", soToken.AccessToken)}},
+		Body:    "",
+	}, doEcho(t, client, req))
+
+	// OAuth - access token (explicit)
+	client, err = Client(tkzServer.URL, WithAuth(soAuth), WithSecret(so, map[string]string{ParamSubtoken: SubtokenAccess}))
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", soToken.AccessToken)}},
+		Body:    "",
+	}, doEcho(t, client, req))
+
+	// OAuth - refresh token (explicit)
+	client, err = Client(tkzServer.URL, WithAuth(soAuth), WithSecret(so, map[string]string{ParamSubtoken: SubtokenRefresh}))
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", soToken.RefreshToken)}},
+		Body:    "",
 	}, doEcho(t, client, req))
 
 	// good auth + bad auth

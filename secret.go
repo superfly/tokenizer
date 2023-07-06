@@ -52,7 +52,7 @@ func (s *Secret) sealRaw(key *[32]byte) (string, error) {
 type wireSecret struct {
 	*InjectProcessorConfig     `json:"inject_processor,omitempty"`
 	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
-	*OAuth2ProcessorConfig     `json:"oauth2_processor,omitempty"`
+	*OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
 	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
 	AllowHostPattern           string   `json:"allowed_host_pattern,omitempty"`
@@ -73,8 +73,8 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 		ws.InjectProcessorConfig = p
 	case *InjectHMACProcessorConfig:
 		ws.InjectHMACProcessorConfig = p
-	case *OAuth2ProcessorConfig:
-		ws.OAuth2ProcessorConfig = p
+	case *OAuthProcessorConfig:
+		ws.OAuthProcessorConfig = p
 	default:
 		return nil, errors.New("bad processor config")
 	}
@@ -111,9 +111,9 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 		np += 1
 		s.ProcessorConfig = ws.InjectHMACProcessorConfig
 	}
-	if ws.OAuth2ProcessorConfig != nil {
+	if ws.OAuthProcessorConfig != nil {
 		np += 1
-		s.ProcessorConfig = ws.OAuth2ProcessorConfig
+		s.ProcessorConfig = ws.OAuthProcessorConfig
 	}
 	if np != 1 {
 		return errors.New("bad processor config")

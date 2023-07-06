@@ -18,22 +18,29 @@ const (
 	ParamDst = "dst"
 
 	// ParamFmt optionally specifies a format string that Inject processors
-	// should use when setting headers. Default is "%s" for Inject and "%x" for
-	// InjectHMAC.
+	// should use when setting headers. Default is "Bearer %s" for string
+	// values and "Bearer %x" for binary values.
 	ParamFmt = "fmt"
 
 	// ParamPayload specifies the string that should be signed by InjectHMAC.
 	// Defaults to verbatim request body with leading/trailing whitespace
 	// removed.
 	ParamPayload = "msg"
+
+	// ParamSubtoken optionally specifies which subtoken should be used.
+	// Default is SubtokenAccessToken.
+	ParamSubtoken = "st"
+)
+
+const (
+	SubtokenAccess  = "access"
+	SubtokenRefresh = "refresh"
 )
 
 type RequestProcessor func(r *http.Request) error
-type ResponseProcessor func(r *http.Response) error
 
 type ProcessorConfig interface {
-	RequestProcessor(map[string]string) (RequestProcessor, error)
-	Updated() bool
+	Processor(map[string]string) (RequestProcessor, error)
 }
 
 type InjectProcessorConfig struct {
@@ -42,27 +49,18 @@ type InjectProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectProcessorConfig)
 
-func (c *InjectProcessorConfig) RequestProcessor(params map[string]string) (RequestProcessor, error) {
-	f := "Bearer %s"
-	if p, ok := params[ParamFmt]; ok {
-		f = p
-	}
-	if !strings.Contains(f, "%s") || strings.Count(f, "%") != 1 {
-		return nil, errors.New("bad fmt")
-	}
-
-	dst := "Authorization"
-	if p, ok := params[ParamDst]; ok {
-		dst = p
-	}
-
-	token := c.Token
-	if token == "" {
+func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	if c.Token == "" {
 		return nil, errors.New("missing token")
 	}
 
+	val, err := applyParamFmt(params[ParamFmt], false, c.Token)
+	if err != nil {
+		return nil, err
+	}
+
 	return func(r *http.Request) error {
-		r.Header.Set(dst, fmt.Sprintf(f, token))
+		applyParamDst(r, params[ParamDst], val)
 		return nil
 	}, nil
 }
@@ -76,7 +74,7 @@ type InjectHMACProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectHMACProcessorConfig)
 
-func (c *InjectHMACProcessorConfig) RequestProcessor(params map[string]string) (RequestProcessor, error) {
+func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
 	var h crypto.Hash
 	switch c.Hash {
 	case "sha256":
@@ -87,19 +85,6 @@ func (c *InjectHMACProcessorConfig) RequestProcessor(params map[string]string) (
 
 	if len(c.Key) == 0 {
 		return nil, errors.New("missing hmac key")
-	}
-
-	f := "Bearer %x"
-	if p, ok := params[ParamFmt]; ok {
-		f = p
-	}
-	if strings.Count(f, "%") != 1 {
-		return nil, errors.New("bad fmt")
-	}
-
-	dst := "Authorization"
-	if p, ok := params[ParamDst]; ok {
-		dst = p
 	}
 
 	var buf io.Reader
@@ -120,10 +105,68 @@ func (c *InjectHMACProcessorConfig) RequestProcessor(params map[string]string) (
 			return err
 		}
 
-		r.Header.Set(dst, fmt.Sprintf(f, hm.Sum(nil)))
+		val, err := applyParamFmt(params[ParamFmt], true, hm.Sum(nil))
+		if err != nil {
+			return err
+		}
+
+		applyParamDst(r, params[ParamDst], val)
 
 		return nil
 	}, nil
 }
 
-func (c *InjectHMACProcessorConfig) Updated() bool { return false }
+type OAuthProcessorConfig struct {
+	Token *OAuthToken `json:"token"`
+}
+
+type OAuthToken struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+}
+
+var _ ProcessorConfig = (*OAuthProcessorConfig)(nil)
+
+func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	token := c.Token.AccessToken
+	if params[ParamSubtoken] == SubtokenRefresh {
+		token = c.Token.RefreshToken
+	}
+
+	if token == "" {
+		return nil, errors.New("missing token")
+	}
+
+	val, err := applyParamFmt(params[ParamFmt], false, token)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(r *http.Request) error {
+		applyParamDst(r, params[ParamDst], val)
+		return nil
+	}, nil
+}
+
+func applyParamDst(r *http.Request, dst string, value string) {
+	if dst == "" {
+		dst = "Authorization"
+	}
+	r.Header.Set(dst, value)
+}
+
+func applyParamFmt(format string, isBinary bool, arg any) (string, error) {
+	switch {
+	case format != "":
+	case isBinary:
+		format = "Bearer %x"
+	default:
+		format = "Bearer %s"
+	}
+
+	if strings.Count(format, "%") != 1 {
+		return "", errors.New("bad fmt")
+	}
+
+	return fmt.Sprintf(format, arg), nil
+}
