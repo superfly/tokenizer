@@ -2,13 +2,17 @@ FROM golang:alpine AS builder
 
 WORKDIR /go/src/github.com/superfly/tokenizer
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/root/.cache/go-build \
+	--mount=type=cache,target=/go/pkg \
+    go mod download
 
 COPY *.go ./
-COPY ./cmd/server ./cmd/server
-RUN go build -o ./bin/server ./cmd/server
+COPY ./cmd/tokenizer ./cmd/tokenizer
+RUN --mount=type=cache,target=/root/.cache/go-build \
+	--mount=type=cache,target=/go/pkg \
+    go build -ldflags="-X 'github.com/superfly/tokenizer/cmd/tokenizer.FilteredHeaders=Fly-Client-Ip,Fly-Forwarded-Port,Fly-Forwarded-Proto,Fly-Forwarded-Ssl,Fly-Region,Fly-Request-Id,Fly-Traceparent,Fly-Tracestate'" -buildvcs=false -o ./bin/tokenizer ./cmd/tokenizer
 
 FROM alpine:latest AS runner
 WORKDIR /root
-COPY --from=builder /go/src/github.com/superfly/tokenizer/bin/server ./server
-CMD ["./server"]
+COPY --from=builder /go/src/github.com/superfly/tokenizer/bin/tokenizer /usr/local/bin/tokenizer
+CMD ["tokenizer"]

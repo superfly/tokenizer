@@ -85,6 +85,10 @@ func NewTokenizer(openKey string) *tokenizer {
 	return tkz
 }
 
+func (t *tokenizer) SealKey() string {
+	return hex.EncodeToString(t.pub[:])
+}
+
 // HandleConnect implements goproxy.HttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 	_, port, _ := strings.Cut(host, ":")

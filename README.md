@@ -1,6 +1,6 @@
 # Tokenizer
 
-This is an HTTP proxy that injects third party authentication credentials into requests. Clients encrypt third party secrets using the proxy's public key. When the client wants to send a request to the third party service, it does so via the proxy, sending along the encrypted secret in the `Proxy-Tokenizer` header. The proxy decrypts the secret and injects it into the client's request. To ensure that encrypted secrets can only be used by authorized clients, the encrypted data also includes instructions on authenticating the client. 
+Tokenizer is an HTTP proxy that injects third party authentication credentials into requests. Clients encrypt third party secrets using the proxy's public key. When the client wants to send a request to the third party service, it does so via the proxy, sending along the encrypted secret in the `Proxy-Tokenizer` header. The proxy decrypts the secret and injects it into the client's request. To ensure that encrypted secrets can only be used by authorized clients, the encrypted data also includes instructions on authenticating the client.
 
 Here's an example secret that the client encrypts using the proxy's public key:
 
@@ -100,3 +100,72 @@ secret = {
     # allowed_host_pattern: ".*\.stripe\.com$"
 }
 ```
+
+## Production deployment — fly.io
+
+Assuming you have [flyctl](https://fly.io/docs/hands-on/install-flyctl/) installed, start by cloning this repository
+
+```shell
+git clone https://github.com/superfly/tokenizer
+cd ./tokenizer
+```
+
+create a fly.io app:
+
+```shell
+fly app create
+export FLY_APP="<name of app>"
+```
+
+generate a private (open) key:
+
+```shell
+OPEN_KEY=$(openssl rand -hex 32)
+fly secrets set --stage OPEN_KEY=$OPEN_KEY
+```
+
+Deploy the app without making it available on the internet<sup>1</sup>:
+
+```shell
+fly deploy --no-public-ips
+```
+
+Tokenizer is now deployed and accessible to other apps in your org at `<name of app>.flycast`. The deploy logs will contain the public (seal) key, which can be used for encrypting secrets.
+
+<sup>1</sup>*Assigning a public IP address to the app is not recommended, since it will happily proxy traffic to private IP addresses. If you require a public deployment, consider running tokenizer in a separate, dedicated organization or using it in conjuction with [smokescreen](https://github.com/stripe/smokescreen).*
+
+## Production deployment — custom
+
+Tokenizer is totally stateless, so it's simple to deploy anywhere.
+
+Assuming you have Golang installed, you can build and install tokenizer in `/usr/local/bin` by running
+
+```shell
+GOBIN=/usr/local/bin go install github.com/superfly/tokenizer/cmd/tokenizer@latest
+```
+
+Generate a private (open) key:
+
+```shell
+export OPEN_KEY=$(openssl rand -hex 32)
+```
+
+Run the tokenizer server:
+
+```shell
+tokenizer
+```
+
+The output will contain the public (seal) key, which can be used for encrypting secrets.
+
+## Test deployment
+
+See the READMEs in `github.com/superfly/tokenizer/cmd/tokenizer` and `github.com/superfly/tokenizer/cmd/curl` for instructions on running/testing tokenizer locally.
+
+## Configuration
+
+Tokenizer is configured with the following environment variables:
+
+- `OPEN_KEY` - The hex encoded 32 byte private key is used for decrypting secrets.
+- `LISTEN_ADDRESS` - The address (`ip:port`) to listen on.
+- `FILTERED_HEADERS` - A comma separated list of request headers to strip from client requests.
