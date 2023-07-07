@@ -1,4 +1,3 @@
-app = "tokenizer"
 kill_signal = "SIGINT"
 kill_timeout = 5
 primary_region = "ord"

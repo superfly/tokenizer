@@ -8,15 +8,10 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	golang.org/x/crypto v0.11.0
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df
-	golang.org/x/oauth2 v0.9.0
 )
 
 require (
 	github.com/alecthomas/repr v0.2.0 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/hexops/gotextdiff v1.0.3 // indirect
-	golang.org/x/net v0.11.0 // indirect
 	golang.org/x/sys v0.10.0 // indirect
-	google.golang.org/appengine v1.6.7 // indirect
-	google.golang.org/protobuf v1.28.0 // indirect
 )
