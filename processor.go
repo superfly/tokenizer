@@ -69,8 +69,6 @@ func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProc
 	}, nil
 }
 
-func (c *InjectProcessorConfig) Updated() bool { return false }
-
 type InjectHMACProcessorConfig struct {
 	Key  []byte `json:"key"`
 	Hash string `json:"hash"`
