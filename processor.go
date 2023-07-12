@@ -164,7 +164,26 @@ func applyParamFmt(format string, isBinary bool, arg any) (string, error) {
 		format = "Bearer %s"
 	}
 
-	if strings.Count(format, "%") != 1 {
+	i := strings.IndexRune(format, '%')
+
+	switch i {
+	case -1:
+		// no format directive
+		return "", errors.New("bad fmt")
+	case len(format) - 1:
+		// last char is %
+		return "", errors.New("bad fmt")
+	}
+
+	// only permit simple (%s, %x, %X) format directives
+	switch format[i+1] {
+	case 'x', 'X', 's':
+	default:
+		return "", errors.New("bad fmt")
+	}
+
+	// only permit single format directive
+	if strings.ContainsRune(format[i+2:], '%') {
 		return "", errors.New("bad fmt")
 	}
 
