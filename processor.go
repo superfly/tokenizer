@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strings"
+
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -45,6 +48,8 @@ type ProcessorConfig interface {
 
 type InjectProcessorConfig struct {
 	Token string `json:"token"`
+	FmtProcessor
+	DstProcessor
 }
 
 var _ ProcessorConfig = new(InjectProcessorConfig)
@@ -54,22 +59,21 @@ func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProc
 		return nil, errors.New("missing token")
 	}
 
-	val, err := applyParamFmt(params[ParamFmt], false, c.Token)
+	val, err := c.ApplyFmt(params, false, c.Token)
 	if err != nil {
 		return nil, err
 	}
 
 	return func(r *http.Request) error {
-		applyParamDst(r, params[ParamDst], val)
-		return nil
+		return c.ApplyDst(params, r, val)
 	}, nil
 }
-
-func (c *InjectProcessorConfig) Updated() bool { return false }
 
 type InjectHMACProcessorConfig struct {
 	Key  []byte `json:"key"`
 	Hash string `json:"hash"`
+	FmtProcessor
+	DstProcessor
 }
 
 var _ ProcessorConfig = new(InjectHMACProcessorConfig)
@@ -105,14 +109,12 @@ func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (Request
 			return err
 		}
 
-		val, err := applyParamFmt(params[ParamFmt], true, hm.Sum(nil))
+		val, err := c.ApplyFmt(params, true, hm.Sum(nil))
 		if err != nil {
 			return err
 		}
 
-		applyParamDst(r, params[ParamDst], val)
-
-		return nil
+		return c.ApplyDst(params, r, val)
 	}, nil
 }
 
@@ -137,31 +139,44 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 		return nil, errors.New("missing token")
 	}
 
-	val, err := applyParamFmt(params[ParamFmt], false, token)
-	if err != nil {
-		return nil, err
-	}
-
 	return func(r *http.Request) error {
-		applyParamDst(r, params[ParamDst], val)
+		r.Header.Set("Authorization", "Bearer "+token)
 		return nil
 	}, nil
 }
 
-func applyParamDst(r *http.Request, dst string, value string) {
-	if dst == "" {
-		dst = "Authorization"
-	}
-	r.Header.Set(dst, value)
+// A helper type to be embedded in RequestProcessors wanting to use the `fmt` config/param.
+type FmtProcessor struct {
+	Fmt        string   `json:"fmt,omitempty"`
+	AllowedFmt []string `json:"allowed_fmt,omitempty"`
 }
 
-func applyParamFmt(format string, isBinary bool, arg any) (string, error) {
+// Apply the format string from the secret config or parameters. isBinary
+// dictates whether %s or %x should be allowed. arg is passed to the sprintf
+// call.
+func (fp FmtProcessor) ApplyFmt(params map[string]string, isBinary bool, arg any) (string, error) {
+	format, hasParam := params[ParamFmt]
+
+	// apply default for param
 	switch {
-	case format != "":
+	case hasParam:
+		// ok
+	case fp.Fmt != "":
+		format = fp.Fmt
+	case len(fp.AllowedFmt) != 0:
+		format = fp.AllowedFmt[0]
 	case isBinary:
 		format = "Bearer %x"
 	default:
 		format = "Bearer %s"
+	}
+
+	// check if param is allowed
+	if fp.Fmt != "" && format != fp.Fmt {
+		return "", errors.New("bad fmt")
+	}
+	if fp.AllowedFmt != nil && !slices.Contains(fp.AllowedFmt, format) {
+		return "", errors.New("bad fmt")
 	}
 
 	i := strings.IndexRune(format, '%')
@@ -176,8 +191,16 @@ func applyParamFmt(format string, isBinary bool, arg any) (string, error) {
 	}
 
 	// only permit simple (%s, %x, %X) format directives
+	// TODO: implement ruby's %m (base64)
 	switch format[i+1] {
-	case 'x', 'X', 's':
+	case 'x', 'X':
+		if !isBinary {
+			return "", errors.New("bad fmt")
+		}
+	case 's':
+		if isBinary {
+			return "", errors.New("bad fmt")
+		}
 	default:
 		return "", errors.New("bad fmt")
 	}
@@ -188,4 +211,50 @@ func applyParamFmt(format string, isBinary bool, arg any) (string, error) {
 	}
 
 	return fmt.Sprintf(format, arg), nil
+}
+
+// A helper type to be embedded in RequestProcessors wanting to use the `dst` config/param.
+type DstProcessor struct {
+	Dst        string   `json:"dst,omitempty"`
+	AllowedDst []string `json:"allowed_dst,omitempty"`
+}
+
+// Apply the specified val to the correct destination header in the request.
+func (fp DstProcessor) ApplyDst(params map[string]string, r *http.Request, val string) error {
+	dst, hasParam := params[ParamDst]
+
+	// apply default for param
+	switch {
+	case hasParam:
+		// ok
+	case fp.Dst != "":
+		dst = fp.Dst
+	case len(fp.AllowedDst) != 0:
+		dst = fp.AllowedDst[0]
+	default:
+		dst = "Authorization"
+	}
+
+	dst = textproto.CanonicalMIMEHeaderKey(dst)
+
+	// check if param is allowed
+	if fp.Dst != "" && dst != textproto.CanonicalMIMEHeaderKey(fp.Dst) {
+		return errors.New("bad dst")
+	}
+	if fp.AllowedDst != nil {
+		var found bool
+		for _, a := range fp.AllowedDst {
+			if dst == textproto.CanonicalMIMEHeaderKey(a) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("bad dst")
+		}
+	}
+
+	r.Header.Set(dst, val)
+
+	return nil
 }
