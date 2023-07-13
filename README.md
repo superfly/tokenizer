@@ -40,36 +40,32 @@ Host: api.stripe.com
 Authorization: Bearer my-stripe-api-token
 ```
 
-Notice that the client's request is to _http_://api.stripe.com. In order for the proxy to be able to inject credentials into requests we need to speak plain HTTP to the proxy server, not HTTPS. The proxy transparently switches to HTTPS for connections to upstream services. We could use HTTPS for communication between the client and the proxy server, but flycast already uses WireGuard and the redundant encryption would only complicate things.
+Notice that the client's request is to _http_://api.stripe.com. In order for the proxy to be able to inject credentials into requests we need to speak plain HTTP to the proxy server, not HTTPS. The proxy transparently switches to HTTPS for connections to upstream services. This assumes communication between the client and tokenizer happens over a secure transport (a VPN).
 
 ## Processors
 
-The processor dictates how the encrypted secret gets turned into a credential and added to the request. The example above uses `inject_processor`, which simply injects the verbatim secret into a request header. By default, this injects the secret into the `Authorization` header without further processing.
-
-The client can include parameters to change this behavior though:
+The processor dictates how the encrypted secret gets turned into a credential and added to the request. The example above uses `inject_processor`, which simply injects the verbatim secret into a request header. By default, this injects the secret into the `Authorization: Bearer` header without further processing. The `inject_processor` can optionally specify a destination and/or printf-style format string to be applied to the injection of the credential:
 
 ```ruby
-processor_params = {
-    dst: "My-Custom-Header", 
-    fmt: "FooBar %s"
+secret = {
+    inject_processor: {
+        token: "my-stripe-api-token",
+        dst:   "X-Stripe-Token",
+        fmt:   "token=%s",
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    }
 }
-
-conn.headers[:proxy_tokenizer] = "#{Base64.encode64(sealed_secret)}; #{processor_params.to_json}"
-
-conn.get("http://api.stripe.com")
 ```
 
-The request will get rewritten to look like this:
+This will result in the header getting injected like this:
 
 ```http
-GET / HTTP/1.1
-Host: api.stripe.com
-My-Custom-Header: FooBar my-stripe-api-key
+X-Stripe-Token: token=my-stripe-api-key
 ```
 
-The parameters are supplied as JSON in the `Proxy-Tokenizer` header after the encrypted secret. The `dst` parameter instructs the processor to put the secret in the `My-Custom-Header` header and the `fmt` parameter is a printf-style format string that is applied to the secret.
-
-Aside from `inject_processor`, we also have `inject_hmac_processor`. This creates an HMAC signatures using the key stored in the encrypted secret and injects that into a request header. The hash algorithm can be specified in the secret under the key `hash` and defaults to SHA256. This processor signs the verbatim request body by default, but can sign custom messages specified in the `msg` parameter in the `Proxy-Tokenizer` header. It also respects the `dst` and `fmt` parameters.
+Aside from `inject_processor`, we also have `inject_hmac_processor`. This creates an HMAC signatures using the key stored in the encrypted secret and injects that into a request header. The hash algorithm can be specified in the secret under the key `hash` and defaults to SHA256. This processor signs the verbatim request body by default, but can sign custom messages specified in the `msg` parameter in the `Proxy-Tokenizer` header (see about parameters bellow). This processor also respects the `dst` and `fmt` options.
 
 ```ruby
 secret = {
@@ -81,6 +77,35 @@ secret = {
         digest: Digest::SHA256.base64digest('trustno1')
     }
 }
+```
+
+## Request-time parameters
+
+If the destination/formatting might vary between requests, `inject_processor` and `inject_hmac_processor` can specify an allowlist of `dst`/`fmt` parameters that the client can specify at request time. These parameters are supplied as JSON in the `Proxy-Tokenizer` header after the encrypted secret.
+
+```ruby
+secret = {
+    inject_processor: {
+        token: "my-stripe-api-token"
+        allowed_dst: ["X-Stripe-Token", "Authorization"],
+        allowed_fmt: ["Bearer %s", "token=%s"],
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    }
+}
+
+seal_key = ENV["TOKENIZER_PUBLIC_KEY"]
+sealed_secret = RbNaCl::Boxes::Sealed.new(seal_key).box(secret.to_json)
+
+processor_params = {
+    dst: "X-Stripe-Token", 
+    fmt: "token=%s"
+}
+
+conn.headers[:proxy_tokenizer] = "#{Base64.encode64(sealed_secret)}; #{processor_params.to_json}"
+
+conn.get("http://api.stripe.com")
 ```
 
 ## Host allowlist

@@ -39,31 +39,6 @@ func TestTokenizer(t *testing.T) {
 		openKey      = hex.EncodeToString(priv[:])
 	)
 
-	siAuth := "trustno1"
-	siToken := "supersecret"
-	si, err := (&Secret{AuthConfig: NewBearerAuthConfig(siAuth), ProcessorConfig: &InjectProcessorConfig{siToken}}).Seal(sealKey)
-	assert.NoError(t, err)
-
-	sihAuth := "secreter"
-	sihKey := []byte("trustno2")
-	sih, err := (&Secret{AuthConfig: NewBearerAuthConfig(sihAuth), ProcessorConfig: &InjectHMACProcessorConfig{Key: sihKey, Hash: "sha256"}}).Seal(sealKey)
-	assert.NoError(t, err)
-
-	soAuth := "secret-oauth-auth"
-	soToken := &OAuthToken{AccessToken: "access-token", RefreshToken: "refresh-token"}
-	so, err := (&Secret{AuthConfig: NewBearerAuthConfig(soAuth), ProcessorConfig: &OAuthProcessorConfig{soToken}}).Seal(sealKey)
-	assert.NoError(t, err)
-
-	ahAuth := "allow-host auth"
-	ahToken := "allow-host secret"
-	sah, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahAuth), ProcessorConfig: &InjectProcessorConfig{ahToken}, RequestValidators: []RequestValidator{AllowHosts(appHost)}}).Seal(sealKey)
-	assert.NoError(t, err)
-
-	ahpAuth := "allow-host-pattern auth"
-	ahpToken := "allow-host-pattern secret"
-	sahp, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahpAuth), ProcessorConfig: &InjectProcessorConfig{ahpToken}, RequestValidators: []RequestValidator{AllowHostPattern(regexp.MustCompile("^" + appHost + "$"))}}).Seal(sealKey)
-	assert.NoError(t, err)
-
 	tkz := NewTokenizer(openKey)
 	tkz.ProxyHttpServer.Verbose = true
 
@@ -97,6 +72,11 @@ func TestTokenizer(t *testing.T) {
 		Headers: http.Header{}, // proxy auth isn't leaked downstream
 		Body:    "",
 	}, doEcho(t, client, req))
+
+	siAuth := "trustno1"
+	siToken := "supersecret"
+	si, err := (&Secret{AuthConfig: NewBearerAuthConfig(siAuth), ProcessorConfig: &InjectProcessorConfig{Token: siToken}}).Seal(sealKey)
+	assert.NoError(t, err)
 
 	// no auth
 	client, err = Client(tkzServer.URL, WithSecret(si, nil))
@@ -136,6 +116,31 @@ func TestTokenizer(t *testing.T) {
 		Body:    "",
 	}, doEcho(t, client, req))
 
+	// CONNECT proxy
+	conn, err := net.Dial("tcp", tkzServer.Listener.Addr().String())
+	connreader := bufio.NewReader(conn)
+	assert.NoError(t, err)
+	creq, err := http.NewRequest(http.MethodConnect, appURL, nil)
+	assert.NoError(t, err)
+	mergeHeader(creq.Header, WithAuth(siAuth))
+	mergeHeader(creq.Header, WithSecret(si, nil))
+	assert.NoError(t, creq.Write(conn))
+	resp, err = http.ReadResponse(connreader, creq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// request via CONNECT proxy
+	client = &http.Client{Transport: &http.Transport{Dial: func(network, addr string) (net.Conn, error) { return conn, nil }}}
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", siToken)}},
+		Body:    "",
+	}, doEcho(t, client, req))
+
+	sihAuth := "secreter"
+	sihKey := []byte("trustno2")
+	sih, err := (&Secret{AuthConfig: NewBearerAuthConfig(sihAuth), ProcessorConfig: &InjectHMACProcessorConfig{Key: sihKey, Hash: "sha256"}}).Seal(sealKey)
+	assert.NoError(t, err)
+
 	// InjectHMAC - sign request body
 	client, err = Client(tkzServer.URL, WithAuth(sihAuth), WithSecret(sih, nil))
 	assert.NoError(t, err)
@@ -170,6 +175,11 @@ func TestTokenizer(t *testing.T) {
 		Headers: http.Header{"Authorization": {fmt.Sprintf("%X", hmacSHA256(t, sihKey, "foo"))}},
 		Body:    "foo",
 	}, doEcho(t, client, req))
+
+	soAuth := "secret-oauth-auth"
+	soToken := &OAuthToken{AccessToken: "access-token", RefreshToken: "refresh-token"}
+	so, err := (&Secret{AuthConfig: NewBearerAuthConfig(soAuth), ProcessorConfig: &OAuthProcessorConfig{soToken}}).Seal(sealKey)
+	assert.NoError(t, err)
 
 	// OAuth - access token (implicit)
 	client, err = Client(tkzServer.URL, WithAuth(soAuth), WithSecret(so, nil))
@@ -210,6 +220,11 @@ func TestTokenizer(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 
+	ahAuth := "allow-host auth"
+	ahToken := "allow-host secret"
+	sah, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahAuth), ProcessorConfig: &InjectProcessorConfig{Token: ahToken}, RequestValidators: []RequestValidator{AllowHosts(appHost)}}).Seal(sealKey)
+	assert.NoError(t, err)
+
 	// allowed hosts - good
 	client, err = Client(tkzServer.URL, WithAuth(ahAuth), WithSecret(sah, nil))
 	assert.NoError(t, err)
@@ -227,6 +242,11 @@ func TestTokenizer(t *testing.T) {
 	resp, err = client.Do(badHostReq)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	ahpAuth := "allow-host-pattern auth"
+	ahpToken := "allow-host-pattern secret"
+	sahp, err := (&Secret{AuthConfig: NewBearerAuthConfig(ahpAuth), ProcessorConfig: &InjectProcessorConfig{Token: ahpToken}, RequestValidators: []RequestValidator{AllowHostPattern(regexp.MustCompile("^" + appHost + "$"))}}).Seal(sealKey)
+	assert.NoError(t, err)
 
 	// allowed host pattern - good
 	client, err = Client(tkzServer.URL, WithAuth(ahpAuth), WithSecret(sahp, nil))
@@ -246,31 +266,34 @@ func TestTokenizer(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	// CONNECT proxy
-	conn, err := net.Dial("tcp", tkzServer.Listener.Addr().String())
-	connreader := bufio.NewReader(conn)
+	sadAuth := "trustno1"
+	sadToken := "supersecret"
+	sad, err := (&Secret{AuthConfig: NewBearerAuthConfig(sadAuth), ProcessorConfig: &InjectProcessorConfig{Token: sadToken, DstProcessor: DstProcessor{AllowedDst: []string{"asdf", "qwer"}}}}).Seal(sealKey)
 	assert.NoError(t, err)
-	creq, err := http.NewRequest(http.MethodConnect, appURL, nil)
-	assert.NoError(t, err)
-	mergeHeader(creq.Header, WithAuth(siAuth))
-	mergeHeader(creq.Header, WithSecret(si, nil))
-	assert.NoError(t, creq.Write(conn))
-	resp, err = http.ReadResponse(connreader, creq)
-	assert.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// request via CONNECT proxy
-	client = &http.Client{Transport: &http.Transport{Dial: func(network, addr string) (net.Conn, error) { return conn, nil }}}
+	// default dst pulled from allow-list
+	client, err = Client(tkzServer.URL, WithAuth(sadAuth), WithSecret(sad, nil))
+	assert.NoError(t, err)
 	assert.Equal(t, &echoResponse{
-		Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", siToken)}},
+		Headers: http.Header{"Asdf": {fmt.Sprintf("Bearer %s", sadToken)}},
 		Body:    "",
 	}, doEcho(t, client, req))
-}
 
-func randomName(prefix string) string {
-	rawName := make([]byte, 8)
-	io.ReadFull(rand.Reader, rawName)
-	return fmt.Sprintf("%s-%x", prefix, rawName)
+	// can specify non-normalized allowed value
+	client, err = Client(tkzServer.URL, WithAuth(sadAuth), WithSecret(sad, map[string]string{ParamDst: "qWeR"}))
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Qwer": {fmt.Sprintf("Bearer %s", sadToken)}},
+		Body:    "",
+	}, doEcho(t, client, req))
+
+	// disallowed dst
+	client, err = Client(tkzServer.URL, WithAuth(sadAuth), WithSecret(sad, map[string]string{ParamDst: "zxcv"}))
+	assert.NoError(t, err)
+	resp, err = client.Do(req)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
 }
 
 type echoResponse struct {
