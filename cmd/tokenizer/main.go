@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -24,6 +26,10 @@ var (
 
 	// Address for HTTP proxy to listen at.
 	ListenAddress = ":8080"
+)
+
+var (
+	versionFlag = flag.Bool("version", false, "print the version number")
 )
 
 func init() {
@@ -43,6 +49,19 @@ func init() {
 }
 
 func main() {
+	flag.Usage = usage
+	flag.Parse()
+
+	switch {
+	case *versionFlag:
+		runVersion()
+	default:
+		runServe()
+	}
+
+}
+
+func runServe() {
 	l, err := net.Listen("tcp", ListenAddress)
 	if err != nil {
 		logrus.WithError(err).Fatal("listen")
@@ -95,4 +114,64 @@ func handleSignals(server *http.Server) {
 			logrus.WithError(err).Warn("immediate shutdown")
 		}
 	}
+}
+
+var Version = ""
+
+func runVersion() {
+	fmt.Fprintln(os.Stderr, versionString())
+}
+
+func versionString() string {
+	if Version != "" {
+		return fmt.Sprintf("tokenizer %s", Version)
+	} else if bi, ok := debug.ReadBuildInfo(); ok {
+		var (
+			commit   string
+			modified bool
+		)
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" {
+				commit = s.Value
+			}
+			if s.Key == "vcs.modified" {
+				modified = s.Value == "true"
+			}
+		}
+
+		switch {
+		case modified:
+			// dev build
+		case bi.Main.Version != "(devel)" && commit != "":
+			return fmt.Sprintf("tokenizer %s, commit=%s", bi.Main.Version, commit)
+		case bi.Main.Version != "(devel)":
+			return fmt.Sprintf("tokenizer %s", bi.Main.Version)
+		case commit != "":
+			return fmt.Sprintf("tokenizer commit=%s", commit)
+		}
+	}
+	return "tokenizer development build"
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `
+tokenizer is an HTTP proxy that injects third party authentication credentials into requests
+
+Usage:
+
+    tokenizer [flags]
+
+Flags:
+    -version      prints the version
+    -help         prints this message
+
+Configuration — tokenizer is configured using the following environment variables:
+
+    OPEN_KEY         - Hex encoded curve25519 private key. You can provide 32
+                       random, hex encoded bytes. The log output will contain
+                       the associated public key.
+    LISTEN_ADDRESS   - The host:port address to listen at. Default: ":8080"
+    FILTERED_HEADERS - Comma separated list of headers to filter from client
+                       requests.
+`[1:])
 }
