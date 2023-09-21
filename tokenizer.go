@@ -60,16 +60,8 @@ func NewTokenizer(openKey string) *tokenizer {
 	proxy := goproxy.NewProxyHttpServer()
 	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub}
 
-	// fly-proxy rewrites incoming requests to not include the full URI so we
-	// have to look at the host header.
 	tkz.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host == "" {
-			http.Error(w, "must specify host", 400)
-			return
-		}
-		r.URL.Scheme = "http"
-		r.URL.Host = r.Host
-		tkz.ServeHTTP(w, r)
+		fmt.Fprintln(w, "I'm not that kind of server")
 	})
 
 	proxy.Tr = &http.Transport{
@@ -116,6 +108,7 @@ func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Requ
 	}
 
 	if reqProcessors, err := t.processorsFromRequest(req); err != nil {
+		logrus.WithError(err).Warn("find processor")
 		return req, errorResponse(err)
 	} else {
 		processors = append(processors, reqProcessors...)

@@ -1,6 +1,5 @@
 kill_signal = "SIGINT"
 kill_timeout = 5
-primary_region = "ord"
 processes = []
 
 [experimental]
@@ -12,11 +11,19 @@ processes = []
   protocol = "tcp"
 
   [[services.ports]]
-    handlers = ["http"]
     port = 80
+
+  [[services.ports]]
+    handlers = ["tls"]
+    port = 443
 
   [[services.tcp_checks]]
     grace_period = "1s"
     interval = "15s"
     restart_limit = 0
     timeout = "2s"
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 750
+    soft_limit = 500
