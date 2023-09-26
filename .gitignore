@@ -1,3 +1,4 @@
 *.pem
 /bin/*
 /.envrc
+.vscode

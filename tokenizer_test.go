@@ -122,8 +122,10 @@ func TestTokenizer(t *testing.T) {
 	assert.NoError(t, err)
 	creq, err := http.NewRequest(http.MethodConnect, appURL, nil)
 	assert.NoError(t, err)
-	mergeHeader(creq.Header, WithAuth(siAuth))
-	mergeHeader(creq.Header, WithSecret(si, nil))
+	opts := clientOptions{}
+	WithAuth(siAuth)(&opts)
+	WithSecret(si, nil)(&opts)
+	mergeHeader(creq.Header, opts.headers)
 	assert.NoError(t, creq.Write(conn))
 	resp, err = http.ReadResponse(connreader, creq)
 	assert.NoError(t, err)
