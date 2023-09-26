@@ -54,6 +54,7 @@ type wireSecret struct {
 	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
 	*OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
+	*MacaroonAuthConfig        `json:"macaroon_auth,omitempty"`
 	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
 	AllowHostPattern           string   `json:"allowed_host_pattern,omitempty"`
 }
@@ -64,6 +65,8 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 	switch a := s.AuthConfig.(type) {
 	case *BearerAuthConfig:
 		ws.BearerAuthConfig = a
+	case *MacaroonAuthConfig:
+		ws.MacaroonAuthConfig = a
 	default:
 		return nil, errors.New("bad auth config")
 	}
@@ -123,6 +126,10 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	if ws.BearerAuthConfig != nil {
 		na += 1
 		s.AuthConfig = ws.BearerAuthConfig
+	}
+	if ws.MacaroonAuthConfig != nil {
+		na += 1
+		s.AuthConfig = ws.MacaroonAuthConfig
 	}
 	if na != 1 {
 		return errors.New("bad auth config")

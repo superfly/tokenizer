@@ -47,11 +47,15 @@ func WithSecret(sealedSecret string, params map[string]string) ClientOption {
 }
 
 func WithAuth(auth string) ClientOption {
+	if len(auth) < 6 || auth[:6] != "FlyV1 " {
+		auth = fmt.Sprintf("Bearer %s", auth)
+	}
+
 	return func(co *clientOptions) {
 		if co.headers == nil {
 			co.headers = make(http.Header)
 		}
-		co.headers.Add(headerProxyAuthorization, fmt.Sprintf("Bearer %s", auth))
+		co.headers.Add(headerProxyAuthorization, auth)
 	}
 }
 
