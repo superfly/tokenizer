@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -97,10 +98,15 @@ func doGenerateSecret(secretToken string) {
 		authConfig = tokenizer.NewBearerAuthConfig(authToken)
 	}
 
+	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("chrisbh4:%s", secretToken)))
+
 	var (
 		secret = &tokenizer.Secret{
-			AuthConfig:      authConfig,
-			ProcessorConfig: &tokenizer.InjectProcessorConfig{Token: secretToken},
+			AuthConfig: authConfig,
+			ProcessorConfig: &tokenizer.InjectProcessorConfig{
+				Token:        basicAuth,
+				FmtProcessor: tokenizer.FmtProcessor{Fmt: "Basic %s"},
+			},
 		}
 	)
 
