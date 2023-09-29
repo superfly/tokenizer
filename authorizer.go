@@ -125,30 +125,28 @@ hdrLoop:
 
 		switch scheme {
 		case "Bearer", "FlyV1":
-			hdr = rest
+			ret = append(ret, rest)
 		case "Basic":
 			raw, err := base64.StdEncoding.DecodeString(rest)
 			if err != nil {
 				logrus.WithError(err).Warn("bad basic auth encoding")
 				continue hdrLoop
 			}
+
 			_, pword, ok := strings.Cut(string(raw), ":")
-
-			if plainPword, err := url.QueryUnescape(pword); err == nil {
-				pword = plainPword
-			}
-
 			if !ok {
 				logrus.Warn("bad basic auth format")
 				continue hdrLoop
 			}
-			hdr = pword
+
+			ret = append(ret, pword)
+
+			if plainPword, err := url.QueryUnescape(pword); err == nil {
+				ret = append(ret, plainPword)
+			}
 		default:
 			logrus.WithField("scheme", scheme).Warn("bad authorization scheme")
-			continue hdrLoop
 		}
-
-		ret = append(ret, hdr)
 	}
 
 	return
