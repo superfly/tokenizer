@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -74,7 +75,7 @@ func (c *MacaroonAuthConfig) AuthRequest(req *http.Request) error {
 		log = log.WithFields(logrus.Fields{"uuid": m.Nonce.UUID()})
 
 		if !bytes.Equal(m.Nonce.KID, expectedKID) {
-			log.WithField("kid", hex.EncodeToString(m.Nonce.KID)).Warn("wrong  macaroon key")
+			log.WithField("kid", hex.EncodeToString(m.Nonce.KID)).Warn("wrong macaroon key")
 			continue
 		}
 
@@ -132,6 +133,11 @@ hdrLoop:
 				continue hdrLoop
 			}
 			_, pword, ok := strings.Cut(string(raw), ":")
+
+			if plainPword, err := url.QueryUnescape(pword); err == nil {
+				pword = plainPword
+			}
+
 			if !ok {
 				logrus.Warn("bad basic auth format")
 				continue hdrLoop
