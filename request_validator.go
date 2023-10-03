@@ -1,6 +1,7 @@
 package tokenizer
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -25,8 +26,15 @@ func AllowHosts(hosts ...string) RequestValidator {
 }
 
 func (v allowedHosts) Validate(r *http.Request) error {
-	if _, allowed := v[r.URL.Host]; !allowed {
-		return fmt.Errorf("%w: secret not valid for %s", ErrBadRequest, r.URL.Host)
+	host := r.URL.Host
+	if host == "" {
+		host = r.Host
+	}
+	if host == "" {
+		return errors.New("coun't find host in request")
+	}
+	if _, allowed := v[host]; !allowed {
+		return fmt.Errorf("%w: secret not valid for %s", ErrBadRequest, host)
 	}
 	return nil
 }
@@ -44,8 +52,15 @@ func AllowHostPattern(pattern *regexp.Regexp) RequestValidator {
 }
 
 func (v *allowedHostPattern) Validate(r *http.Request) error {
-	if match := (*regexp.Regexp)(v).MatchString(r.URL.Host); !match {
-		return fmt.Errorf("%w: secret not valid for %s", ErrBadRequest, r.URL.Host)
+	host := r.URL.Host
+	if host == "" {
+		host = r.Host
+	}
+	if host == "" {
+		return errors.New("coun't find host in request")
+	}
+	if match := (*regexp.Regexp)(v).MatchString(host); !match {
+		return fmt.Errorf("%w: secret not valid for %s", ErrBadRequest, host)
 	}
 	return nil
 }
