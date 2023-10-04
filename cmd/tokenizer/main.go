@@ -80,7 +80,12 @@ func runServe() {
 
 	tkz := tokenizer.NewTokenizer(key)
 
-	server := &http.Server{Handler: loggingMiddleware(tkz)}
+	if len(os.Getenv("DEBUG")) != 0 {
+		tkz.ProxyHttpServer.Verbose = true
+		tkz.ProxyHttpServer.Logger = logrus.StandardLogger()
+	}
+
+	server := &http.Server{Handler: tkz}
 
 	go func() {
 		if err := server.Serve(l); !errors.Is(err, http.ErrServerClosed) {

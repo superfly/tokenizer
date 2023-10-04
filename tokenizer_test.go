@@ -56,7 +56,7 @@ func TestTokenizer(t *testing.T) {
 	// TLS error (proxy doesn't trust upstream)
 	resp, err := client.Get(appURL)
 	assert.NoError(t, err)
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
 
 	// make proxy trust upstream
 	upstreamTrust.AddCert(appServer.Certificate())
