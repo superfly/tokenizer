@@ -13,12 +13,14 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/elazarl/goproxy"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
+	"golang.org/x/exp/maps"
 )
 
 var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
@@ -40,10 +42,6 @@ type tokenizer struct {
 	priv *[32]byte
 	pub  *[32]byte
 }
-
-var _ goproxy.HttpsHandler = (*tokenizer)(nil)
-var _ goproxy.ReqHandler = (*tokenizer)(nil)
-var _ http.Handler = new(tokenizer)
 
 func NewTokenizer(openKey string) *tokenizer {
 	privBytes, err := hex.DecodeString(openKey)
@@ -71,8 +69,9 @@ func NewTokenizer(openKey string) *tokenizer {
 	}
 	proxy.ConnectDial = nil
 	proxy.ConnectDialWithReq = nil
-	proxy.OnRequest().HandleConnect(tkz)
-	proxy.OnRequest().Do(tkz)
+	proxy.OnRequest().HandleConnectFunc(tkz.HandleConnect)
+	proxy.OnRequest().DoFunc(tkz.HandleRequest)
+	proxy.OnResponse().DoFunc(tkz.HandleResponse)
 
 	return tkz
 }
@@ -81,34 +80,76 @@ func (t *tokenizer) SealKey() string {
 	return hex.EncodeToString(t.pub[:])
 }
 
-// HandleConnect implements goproxy.HttpsHandler
+// data that we can pass around between callbacks
+type proxyUserData struct {
+	// processors from our handling of the initial CONNECT request if this is a
+	// tunneled connection.
+	connectProcessors []RequestProcessor
+
+	// start time of the CONNECT request if this is a tunneled connection.
+	connectStart time.Time
+	connLog      logrus.FieldLogger
+
+	// start time of the current request. gets reset between requests within a
+	// tunneled connection.
+	requestStart time.Time
+	reqLog       logrus.FieldLogger
+}
+
+// HandleConnect implements goproxy.FuncHttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+	pud := &proxyUserData{
+		connLog:      logrus.WithField("connect_host", host),
+		connectStart: time.Now(),
+	}
+
 	_, port, _ := strings.Cut(host, ":")
 	if port == "443" {
-		logrus.WithField("host", host).Warn("attempt to proxy to https downstream")
+		pud.connLog.Warn("attempt to proxy to https downstream")
 		ctx.Resp = errorResponse(ErrBadRequest)
 		return goproxy.RejectConnect, ""
 	}
 
-	processors, err := t.processorsFromRequest(ctx.Req)
-	if err != nil {
+	var err error
+	if pud.connectProcessors, err = t.processorsFromRequest(ctx.Req); err != nil {
+		pud.connLog.WithError(err).Warn("find processor (CONNECT)")
 		ctx.Resp = errorResponse(err)
 		return goproxy.RejectConnect, ""
 	}
 
-	ctx.UserData = processors
+	ctx.UserData = pud
+
 	return goproxy.HTTPMitmConnect, host
 }
 
-// Handle implements goproxy.FuncReqHandler
-func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	var processors []RequestProcessor
-	if ctx.UserData != nil {
-		processors = ctx.UserData.([]RequestProcessor)
+// HandleRequest implements goproxy.FuncReqHandler
+func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	if ctx.UserData == nil {
+		ctx.UserData = &proxyUserData{}
+	}
+	pud, ok := ctx.UserData.(*proxyUserData)
+
+	if !ok || !pud.requestStart.IsZero() || pud.reqLog != nil {
+		logrus.Warn("bad proxyUserData")
+		return nil, errorResponse(ErrInternal)
 	}
 
+	pud.requestStart = time.Now()
+	if pud.connLog != nil {
+		pud.reqLog = pud.connLog
+	} else {
+		pud.reqLog = logrus.StandardLogger()
+	}
+	pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
+		"method":    req.Method,
+		"host":      req.Host,
+		"path":      req.URL.Path,
+		"queryKeys": strings.Join(maps.Keys(req.URL.Query()), ", "),
+	})
+
+	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
 	if reqProcessors, err := t.processorsFromRequest(req); err != nil {
-		logrus.WithError(err).Warn("find processor")
+		pud.reqLog.WithError(err).Warn("find processor")
 		return req, errorResponse(err)
 	} else {
 		processors = append(processors, reqProcessors...)
@@ -116,7 +157,7 @@ func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Requ
 
 	for _, processor := range processors {
 		if err := processor(req); err != nil {
-			logrus.WithError(err).Warn("run processor")
+			pud.reqLog.WithError(err).Warn("run processor")
 			return nil, errorResponse(ErrBadRequest)
 		}
 	}
@@ -126,6 +167,49 @@ func (t *tokenizer) Handle(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Requ
 	}
 
 	return req, nil
+}
+
+// HandleResponse implements goproxy.FuncRespHandler
+func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	// This callback is hit twice if there was an error in the downstream
+	// request. The first time a nil request is given and the second time we're
+	// given whatever we returned the first time. Skip logging on the second
+	// call. This should continue to work okay if
+	// https://github.com/elazarl/goproxy/pull/512 is ever merged.
+	if ctx.Error != nil && resp != nil {
+		return resp
+	}
+
+	pud, ok := ctx.UserData.(*proxyUserData)
+	if !ok || pud.requestStart.IsZero() || pud.reqLog == nil {
+		logrus.Warn("missing proxyUserData")
+		return errorResponse(ErrInternal)
+	}
+
+	log := pud.reqLog.WithField("durMS", int64(time.Since(pud.requestStart)/time.Millisecond))
+
+	if !pud.connectStart.IsZero() {
+		log = log.WithField("connDurMS", int64(time.Since(pud.connectStart)/time.Millisecond))
+	}
+	if resp != nil {
+		log = log.WithField("status", resp.StatusCode)
+	}
+
+	// reset pud for next request in tunnel
+	pud.requestStart = time.Time{}
+	if pud.connLog != nil {
+		pud.reqLog = pud.connLog
+	} else {
+		pud.reqLog = logrus.StandardLogger()
+	}
+
+	if ctx.Error != nil {
+		log.WithError(ctx.Error).Warn()
+		return errorResponse(ctx.Error)
+	}
+
+	log.Info()
+	return resp
 }
 
 func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, error) {

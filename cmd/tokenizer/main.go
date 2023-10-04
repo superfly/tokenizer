@@ -80,7 +80,7 @@ func runServe() {
 
 	tkz := tokenizer.NewTokenizer(key)
 
-	server := &http.Server{Handler: loggingMiddleware(tkz)}
+	server := &http.Server{Handler: tkz}
 
 	go func() {
 		if err := server.Serve(l); !errors.Is(err, http.ErrServerClosed) {
