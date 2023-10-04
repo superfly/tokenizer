@@ -193,15 +193,12 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 	}
 	if resp != nil {
 		log = log.WithField("status", resp.StatusCode)
+		resp.Header.Set("Connection", "close")
 	}
 
 	// reset pud for next request in tunnel
 	pud.requestStart = time.Time{}
-	if pud.connLog != nil {
-		pud.reqLog = pud.connLog
-	} else {
-		pud.reqLog = logrus.StandardLogger()
-	}
+	pud.reqLog = nil
 
 	if ctx.Error != nil {
 		log.WithError(ctx.Error).Warn()
@@ -209,6 +206,7 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 	}
 
 	log.Info()
+
 	return resp
 }
 
@@ -299,13 +297,20 @@ func errorResponse(err error) *http.Response {
 		status = http.StatusBadGateway
 	}
 
-	return &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader([]byte(err.Error())))}
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(bytes.NewReader([]byte(err.Error()))),
+		Header:     make(http.Header),
+	}
 }
 
 func forceTLSDialer(network, addr string) (net.Conn, error) {
-	if network != "tcp" {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	default:
 		return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
 	}
+
 	hostname, port, _ := strings.Cut(addr, ":")
 	if hostname == "" {
 		return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
@@ -317,5 +322,6 @@ func forceTLSDialer(network, addr string) (net.Conn, error) {
 		port = "443"
 	}
 	addr = fmt.Sprintf("%s:%s", hostname, port)
+
 	return tls.Dial("tcp", addr, &tls.Config{RootCAs: upstreamTrust})
 }

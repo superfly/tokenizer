@@ -80,6 +80,11 @@ func runServe() {
 
 	tkz := tokenizer.NewTokenizer(key)
 
+	if len(os.Getenv("DEBUG")) != 0 {
+		tkz.ProxyHttpServer.Verbose = true
+		tkz.ProxyHttpServer.Logger = logrus.StandardLogger()
+	}
+
 	server := &http.Server{Handler: tkz}
 
 	go func() {
