@@ -1,4 +1,4 @@
-FROM golang:alpine AS builder
+FROM golang:1.21-alpine AS builder
 
 WORKDIR /go/src/github.com/superfly/tokenizer
 COPY go.mod go.sum ./
