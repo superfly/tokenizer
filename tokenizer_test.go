@@ -59,7 +59,7 @@ func TestTokenizer(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
 
 	// make proxy trust upstream
-	upstreamTrust.AddCert(appServer.Certificate())
+	UpstreamTrust.AddCert(appServer.Certificate())
 
 	// no proxy auth or secrets (good)
 	assert.Equal(t, &echoResponse{

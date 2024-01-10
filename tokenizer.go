@@ -25,11 +25,12 @@ import (
 
 var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
 
-var upstreamTrust *x509.CertPool
+// UpstreamTrust is the trusted certificate pool to use for upstream requests.
+var UpstreamTrust *x509.CertPool
 
 func init() {
 	var err error
-	upstreamTrust, err = x509.SystemCertPool()
+	UpstreamTrust, err = x509.SystemCertPool()
 	if err != nil {
 		panic(err)
 	}
@@ -323,5 +324,5 @@ func forceTLSDialer(network, addr string) (net.Conn, error) {
 	}
 	addr = fmt.Sprintf("%s:%s", hostname, port)
 
-	return tls.Dial("tcp", addr, &tls.Config{RootCAs: upstreamTrust})
+	return tls.Dial("tcp", addr, &tls.Config{RootCAs: UpstreamTrust})
 }
