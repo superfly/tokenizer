@@ -59,7 +59,7 @@ func NewTokenizer(openKey string) *tokenizer {
 	proxy := goproxy.NewProxyHttpServer()
 	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub}
 
-	tkz.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "I'm not that kind of server")
 	})
 
@@ -155,6 +155,13 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 	} else {
 		processors = append(processors, reqProcessors...)
 	}
+
+	if len(processors) == 0 {
+		pud.reqLog.Warn("no processors")
+		return nil, errorResponse(ErrBadRequest)
+	}
+
+	pud.reqLog = pud.reqLog.WithField("processors", len(processors))
 
 	for _, processor := range processors {
 		if err := processor(req); err != nil {
