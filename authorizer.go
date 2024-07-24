@@ -13,6 +13,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/macaroon"
 	"github.com/superfly/macaroon/bundle"
+	"github.com/superfly/macaroon/flyio"
+	"github.com/superfly/macaroon/flyio/machinesapi"
 	tkmac "github.com/superfly/tokenizer/macaroon"
 )
 
@@ -100,6 +102,42 @@ func (c *MacaroonAuthConfig) Macaroon(caveats ...macaroon.Caveat) (string, error
 	}
 
 	return macaroon.ToAuthorizationHeader(mb), nil
+}
+
+type FlyioMacaroonAuthConfig struct {
+	Access flyio.Access `json:"access"`
+}
+
+func NewFlyioMacaroonAuthConfig(access *flyio.Access) *FlyioMacaroonAuthConfig {
+	return &FlyioMacaroonAuthConfig{Access: *access}
+}
+
+var _ AuthConfig = new(FlyioMacaroonAuthConfig)
+
+func (c *FlyioMacaroonAuthConfig) AuthRequest(req *http.Request) error {
+	var ctx = req.Context()
+
+	for _, tok := range proxyAuthorizationTokens(req) {
+		bun, err := flyio.ParseBundle(tok)
+		if err != nil {
+			logrus.WithError(err).Warn("bad macaroon format")
+			continue
+		}
+
+		if _, err := bun.Verify(ctx, machinesapi.DefaultClient); err != nil {
+			logrus.WithError(err).Warn("bad macaroon signature")
+			continue
+		}
+
+		if err := bun.Validate(&c.Access); err != nil {
+			logrus.WithError(err).Warn("bad macaroon authz")
+			continue
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
 }
 
 func proxyAuthorizationTokens(req *http.Request) (ret []string) {
