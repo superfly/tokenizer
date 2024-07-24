@@ -1,7 +1,6 @@
 package tokenizer
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/macaroon"
+	"github.com/superfly/macaroon/bundle"
 	tkmac "github.com/superfly/tokenizer/macaroon"
 )
 
@@ -58,34 +58,22 @@ func (c *MacaroonAuthConfig) AuthRequest(req *http.Request) error {
 	var (
 		expectedKID = tkmac.KeyFingerprint(c.Key)
 		log         = logrus.WithField("expected-kid", hex.EncodeToString(expectedKID))
+		ctx         = req.Context()
 	)
 
 	for _, tok := range proxyAuthorizationTokens(req) {
-		permission, discharges, err := macaroon.ParsePermissionAndDischargeTokens(tok, tkmac.Location)
-		if err != nil {
-			log.WithError(err).Warn("bad macaroon encoding")
-			continue
-		}
-
-		m, err := macaroon.Decode(permission)
+		bun, err := bundle.ParseBundle(tkmac.Location, tok)
 		if err != nil {
 			log.WithError(err).Warn("bad macaroon format")
 			continue
 		}
-		log = log.WithFields(logrus.Fields{"uuid": m.Nonce.UUID()})
 
-		if !bytes.Equal(m.Nonce.KID, expectedKID) {
-			log.WithField("kid", hex.EncodeToString(m.Nonce.KID)).Warn("wrong macaroon key")
-			continue
-		}
-
-		cavs, err := m.Verify(c.Key, discharges, nil)
-		if err != nil {
+		if _, err = bun.Verify(ctx, bundle.WithKey(expectedKID, c.Key, nil)); err != nil {
 			log.WithError(err).Warn("bad macaroon signature")
 			continue
 		}
 
-		if err = cavs.Validate(&tkmac.Access{Request: req}); err != nil {
+		if err = bun.Validate(&tkmac.Access{Request: req}); err != nil {
 			log.WithError(err).Warn("bad macaroon authz")
 			continue
 		}
