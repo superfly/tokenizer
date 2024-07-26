@@ -16,6 +16,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/tokenizer"
+	"golang.org/x/exp/slices"
 )
 
 // Package variables can be overridden at build time:
@@ -83,6 +84,10 @@ func runServe() {
 	if len(os.Getenv("DEBUG")) != 0 {
 		tkz.ProxyHttpServer.Verbose = true
 		tkz.ProxyHttpServer.Logger = logrus.StandardLogger()
+	}
+
+	if slices.Contains([]string{"1", "true"}, os.Getenv("OPEN_PROXY")) {
+		tkz.OpenProxy = true
 	}
 
 	server := &http.Server{Handler: tkz}

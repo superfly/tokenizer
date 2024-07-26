@@ -22,7 +22,7 @@ The client configures their HTTP library to use the tokenizer service as it's HT
 
 ```ruby
 conn = Faraday.new(
-    proxy: "http://tokenizer.flycast", 
+    proxy: "http://tokenizer.flycast",
     headers: {
         proxy_tokenizer: Base64.encode64(sealed_secret),
         proxy_authorization: "Bearer trustno1"
@@ -99,7 +99,7 @@ seal_key = ENV["TOKENIZER_PUBLIC_KEY"]
 sealed_secret = RbNaCl::Boxes::Sealed.new(seal_key).box(secret.to_json)
 
 processor_params = {
-    dst: "X-Stripe-Token", 
+    dst: "X-Stripe-Token",
     fmt: "token=%s"
 }
 
@@ -110,7 +110,7 @@ conn.get("http://api.stripe.com")
 
 ## Host allowlist
 
-If a client is fully compromised, the attacker could send encrypted secrets via tokenizer to a service that simply echoes back the request. This way, the attacker could learn the plaintext value of the secret. To mitigate against this, secrets can specify which hosts they may be used against. 
+If a client is fully compromised, the attacker could send encrypted secrets via tokenizer to a service that simply echoes back the request. This way, the attacker could learn the plaintext value of the secret. To mitigate against this, secrets can specify which hosts they may be used against.
 
 ```ruby
 secret = {
@@ -194,3 +194,4 @@ Tokenizer is configured with the following environment variables:
 - `OPEN_KEY` - The hex encoded 32 byte private key is used for decrypting secrets.
 - `LISTEN_ADDRESS` - The address (`ip:port`) to listen on.
 - `FILTERED_HEADERS` - A comma separated list of request headers to strip from client requests.
+- `OPEN_PROXY` - Setting `1` or `true` will allow requests that don't contain sealed secrets to be proxied. Such requests are blocked by default.

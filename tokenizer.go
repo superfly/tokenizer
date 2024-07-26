@@ -40,6 +40,10 @@ const headerProxyTokenizer = "Proxy-Tokenizer"
 
 type tokenizer struct {
 	*goproxy.ProxyHttpServer
+
+	// OpenProxy dictates whether requests without any sealed secrets are allowed.
+	OpenProxy bool
+
 	priv *[32]byte
 	pub  *[32]byte
 }
@@ -156,7 +160,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		processors = append(processors, reqProcessors...)
 	}
 
-	if len(processors) == 0 {
+	if len(processors) == 0 && !t.OpenProxy {
 		pud.reqLog.Warn("no processors")
 		return nil, errorResponse(ErrBadRequest)
 	}
