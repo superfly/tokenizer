@@ -3,10 +3,10 @@ module github.com/superfly/tokenizer
 go 1.20
 
 require (
-	github.com/alecthomas/assert/v2 v2.2.2
+	github.com/alecthomas/assert/v2 v2.3.0
 	github.com/elazarl/goproxy v0.0.0-20230731152917-f99041a5c027
 	github.com/sirupsen/logrus v1.9.3
-	github.com/superfly/macaroon v0.0.5
+	github.com/superfly/macaroon v0.2.14-0.20240718172852-139f90b76537
 	golang.org/x/crypto v0.12.0
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
 )
@@ -14,6 +14,7 @@ require (
 require (
 	github.com/alecthomas/repr v0.2.0 // indirect
 	github.com/google/uuid v1.3.0 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hexops/gotextdiff v1.0.3 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.3.5 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
