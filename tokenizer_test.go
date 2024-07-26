@@ -47,13 +47,17 @@ func TestTokenizer(t *testing.T) {
 	tkzServer := httptest.NewServer(tkz)
 	defer tkzServer.Close()
 
-	client, err := Client(tkzServer.URL)
-	assert.NoError(t, err)
-
 	req, err := http.NewRequest(http.MethodPost, appURL+"/foo", nil)
 	assert.NoError(t, err)
 
+	auth := "trustno1"
+	token := "supersecret"
+	secret, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth), ProcessorConfig: &InjectProcessorConfig{Token: token}}).Seal(sealKey)
+	assert.NoError(t, err)
+
 	// TLS error (proxy doesn't trust upstream)
+	client, err := Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+	assert.NoError(t, err)
 	resp, err := client.Get(appURL)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
@@ -61,19 +65,12 @@ func TestTokenizer(t *testing.T) {
 	// make proxy trust upstream
 	UpstreamTrust.AddCert(appServer.Certificate())
 
-	// no proxy auth or secrets (good)
-	assert.Equal(t, &echoResponse{
-		Headers: http.Header{},
-		Body:    "",
-	}, doEcho(t, client, req))
-
-	// bad proxy auth doesn't matter if no secrets are used
-	client, err = Client(tkzServer.URL, WithAuth("bogus"))
+	// error if no secrets
+	client, err = Client(tkzServer.URL, WithAuth(auth))
 	assert.NoError(t, err)
-	assert.Equal(t, &echoResponse{
-		Headers: http.Header{}, // proxy auth isn't leaked downstream
-		Body:    "",
-	}, doEcho(t, client, req))
+	resp, err = client.Get(appURL)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
 	t.Run("inject processor", func(t *testing.T) {
 		auth := "trustno1"
