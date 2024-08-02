@@ -1,10 +1,8 @@
 package sigv4
 
 import (
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -89,38 +87,6 @@ func parseAuthHeader(header string) (authHeader, error) {
 	return ah, nil
 }
 
-func validateRequest(req *http.Request, bodyHash string, origCreds aws.Credentials, ah authHeader) error {
-
-	// Create a copy of the original request, containing only relevant fields for signing
-	// crucially: this copy does not contain the actual body or signature from the original request.
-	clonedReq, err := http.NewRequest(req.Method, req.URL.String(), nil)
-	if err != nil {
-		return err
-	}
-	clonedReq.Header.Set("Content-Type", req.Header.Get("Content-Type"))
-	for k, v := range req.Header {
-		lowerKey := strings.ToLower(k)
-		if strings.HasPrefix(lowerKey, "x-amz-") {
-			clonedReq.Header[k] = v
-		}
-	}
-
-	signer := v4.NewSigner()
-	err = signer.SignHTTP(req.Context(), origCreds, clonedReq, bodyHash, ah.credential.service, ah.credential.region, ah.credential.date)
-	if err != nil {
-		return fmt.Errorf("failed to sign sigv4 request: %w", err)
-	}
-
-	// Validate clonedReq's Authorization header against the original req's. They should match.
-
-	originalAuth := req.Header.Get("Authorization")
-	newAuth := clonedReq.Header.Get("Authorization")
-	if originalAuth != newAuth {
-		return ErrorInvalidAuthHeader
-	}
-	return nil
-}
-
 func Process(req *http.Request, originalCreds *aws.Credentials, newCreds aws.Credentials) error {
 
 	authHeader := req.Header.Get("Authorization")
@@ -134,25 +100,9 @@ func Process(req *http.Request, originalCreds *aws.Credentials, newCreds aws.Cre
 		return err
 	}
 
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read request body: %w", err)
-	}
-
-	payloadHash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // SHA-256 hash of an empty string
-	if origHash := req.Header.Get("X-Amz-Content-Sha256"); origHash == "UNSIGNED-PAYLOAD" {
-		payloadHash = origHash
-	} else if len(body) > 0 {
-		payloadHash = fmt.Sprintf("%x", sha256.Sum256(body))
-	}
-
-	err = validateRequest(req, payloadHash, *originalCreds, ah)
-	if err != nil {
-		return err
-	}
-
-	// Sign the request with the new credentials
+	// Strip the Authorization header from the request
+	req.Header.Del("Authorization")
 
 	signer := v4.NewSigner()
-	return signer.SignHTTP(req.Context(), newCreds, req, payloadHash, ah.credential.service, ah.credential.region, ah.credential.date)
+	return signer.SignHTTP(req.Context(), newCreds, req, req.Header.Get("X-Amz-Content-Sha256"), ah.credential.service, ah.credential.region, ah.credential.date)
 }
