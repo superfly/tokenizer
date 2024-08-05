@@ -12,6 +12,8 @@ import (
 	"net/textproto"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/superfly/tokenizer/sigv4"
 	"golang.org/x/exp/slices"
 )
 
@@ -142,6 +144,31 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 	return func(r *http.Request) error {
 		r.Header.Set("Authorization", "Bearer "+token)
 		return nil
+	}, nil
+}
+
+type Sigv4ProcessorConfig struct {
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+}
+
+var _ ProcessorConfig = (*Sigv4ProcessorConfig)(nil)
+
+func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+
+	if len(c.AccessKey) == 0 {
+		return nil, errors.New("missing access key")
+	}
+	if len(c.SecretKey) == 0 {
+		return nil, errors.New("missing secret key")
+	}
+
+	return func(r *http.Request) error {
+		// NOTE: Sigv4 has pretty robust defenses against request forgery and reuse. This does *not* make those guarantees, and likely can not.
+		return sigv4.Process(r, nil, aws.Credentials{
+			AccessKeyID:     c.AccessKey,
+			SecretAccessKey: c.SecretKey,
+		})
 	}, nil
 }
 
