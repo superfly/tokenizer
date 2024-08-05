@@ -11,9 +11,10 @@ import (
 	"net/http"
 	"net/textproto"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/superfly/tokenizer/sigv4"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"golang.org/x/exp/slices"
 )
 
@@ -164,11 +165,57 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 	}
 
 	return func(r *http.Request) error {
-		// NOTE: Sigv4 has pretty robust defenses against request forgery and reuse. This does *not* make those guarantees, and likely can not.
-		return sigv4.Process(r, nil, aws.Credentials{
+		// NOTE: Sigv4 has defenses against request forgery and reuse.
+		// This does *not* make those guarantees, and likely can not.
+
+		var (
+			service string
+			region  string
+			date    time.Time
+			err     error
+		)
+
+		// Parse the auth header to get the service, region, and date
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			return errors.New("expected request to contain an Authorization header")
+		}
+
+		for _, section := range strings.Split(authHeader, " ") {
+			section = strings.TrimRight(section, ",")
+			keyValuePair := strings.SplitN(section, "=", 2)
+			if len(keyValuePair) != 2 {
+				continue
+			}
+
+			if keyValuePair[0] == "Credential" {
+				credParts := strings.Split(keyValuePair[1], "/")
+				if len(credParts) != 5 {
+					return errors.New("invalid credential in auth header")
+				}
+
+				dateStr := credParts[1]
+				date, err = time.Parse("20060102T150405Z", dateStr)
+				if err != nil {
+					return err
+				}
+
+				service = credParts[2]
+				region = credParts[3]
+				break
+			}
+		}
+
+		// Strip the Authorization header from the request
+		r.Header.Del("Authorization")
+
+		credentials := aws.Credentials{
 			AccessKeyID:     c.AccessKey,
 			SecretAccessKey: c.SecretKey,
-		})
+		}
+
+		signer := v4.NewSigner()
+		return signer.SignHTTP(r.Context(), credentials, r, r.Header.Get("X-Amz-Content-Sha256"), service, region, date)
 	}, nil
 }
 
