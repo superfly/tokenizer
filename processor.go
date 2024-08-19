@@ -205,6 +205,12 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 				break
 			}
 		}
+		if timestamp := r.Header.Get("X-Amz-Date"); timestamp != "" {
+			date, err = time.Parse("20060102T150405Z", timestamp)
+			if err != nil {
+				return err
+			}
+		}
 
 		// Strip the Authorization header from the request
 		r.Header.Del("Authorization")
@@ -214,8 +220,22 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 			SecretAccessKey: c.SecretKey,
 		}
 
+		// HACK: We have to strip the filtered headers *before* the request gets signed,
+		//       since sigv4 expects a signature of all the request's headers.
+		for _, h := range FilteredHeaders {
+			r.Header.Del(h)
+		}
+		// Remove headers that goproxy will strip out later anyway. Otherwise, the header signature check will fail.
+		// https://github.com/elazarl/goproxy/blob/8b0c205063807802a7ac1d75351a90172a9c83fb/proxy.go#L87-L92
+		r.Header.Del("Accept-Encoding")
+		r.Header.Del("Proxy-Connection")
+		r.Header.Del("Proxy-Authenticate")
+		r.Header.Del("Proxy-Authorization")
+
 		signer := v4.NewSigner()
-		return signer.SignHTTP(r.Context(), credentials, r, r.Header.Get("X-Amz-Content-Sha256"), service, region, date)
+		err = signer.SignHTTP(r.Context(), credentials, r, r.Header.Get("X-Amz-Content-Sha256"), service, region, date)
+
+		return err
 	}, nil
 }
 
