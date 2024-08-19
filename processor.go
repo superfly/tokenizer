@@ -195,7 +195,7 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 				}
 
 				dateStr := credParts[1]
-				date, err = time.Parse("20060102T150405Z", dateStr)
+				date, err = time.Parse("20060102", dateStr)
 				if err != nil {
 					return err
 				}
