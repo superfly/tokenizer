@@ -211,6 +211,9 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 				return err
 			}
 		}
+		if service == "" || region == "" || date.IsZero() {
+			return errors.New("expected valid sigv4 authentication header in request to tokenizer")
+		}
 
 		// Strip the Authorization header from the request
 		r.Header.Del("Authorization")
