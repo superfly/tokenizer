@@ -30,6 +30,8 @@ github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/
 github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcUk=
 github.com/superfly/macaroon v0.2.14-0.20240718172852-139f90b76537 h1:xL2tIkau3Dr3dd4WOLbGz14kRcF49x15bVIMdOkLTyI=
 github.com/superfly/macaroon v0.2.14-0.20240718172852-139f90b76537/go.mod h1:Kt6/EdSYfFjR4GIe+erMwcJgU8iMu1noYVceQ5dNdKo=
+github.com/superfly/macaroon v0.2.14-0.20240819201738-61a02aa53648 h1:YQG1v1QcTFQxJureNBcbtxosZ98u78ceUNCDQgI/vgM=
+github.com/superfly/macaroon v0.2.14-0.20240819201738-61a02aa53648/go.mod h1:Kt6/EdSYfFjR4GIe+erMwcJgU8iMu1noYVceQ5dNdKo=
 github.com/vmihailenco/msgpack/v5 v5.3.5 h1:5gO0H1iULLWGhs2H5tbAHIZTV8/cYafcFOr9znI5mJU=
 github.com/vmihailenco/msgpack/v5 v5.3.5/go.mod h1:7xyJ9e+0+9SaZT0Wt1RGleJXzli6Q/V5KbhBonMG9jc=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
