@@ -53,6 +53,7 @@ type wireSecret struct {
 	*InjectProcessorConfig     `json:"inject_processor,omitempty"`
 	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
 	*OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
+	*Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
 	*MacaroonAuthConfig        `json:"macaroon_auth,omitempty"`
 	*FlyioMacaroonAuthConfig   `json:"flyio_macaroon_auth,omitempty"`
@@ -81,6 +82,8 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 		ws.InjectHMACProcessorConfig = p
 	case *OAuthProcessorConfig:
 		ws.OAuthProcessorConfig = p
+	case *Sigv4ProcessorConfig:
+		ws.Sigv4ProcessorConfig = p
 	default:
 		return nil, errors.New("bad processor config")
 	}
@@ -120,6 +123,10 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	if ws.OAuthProcessorConfig != nil {
 		np += 1
 		s.ProcessorConfig = ws.OAuthProcessorConfig
+	}
+	if ws.Sigv4ProcessorConfig != nil {
+		np += 1
+		s.ProcessorConfig = ws.Sigv4ProcessorConfig
 	}
 	if np != 1 {
 		return errors.New("bad processor config")

@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"net/textproto"
 	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"golang.org/x/exp/slices"
 )
 
@@ -142,6 +145,100 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 	return func(r *http.Request) error {
 		r.Header.Set("Authorization", "Bearer "+token)
 		return nil
+	}, nil
+}
+
+type Sigv4ProcessorConfig struct {
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+}
+
+var _ ProcessorConfig = (*Sigv4ProcessorConfig)(nil)
+
+func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+
+	if len(c.AccessKey) == 0 {
+		return nil, errors.New("missing access key")
+	}
+	if len(c.SecretKey) == 0 {
+		return nil, errors.New("missing secret key")
+	}
+
+	return func(r *http.Request) error {
+		// NOTE: Sigv4 has defenses against request forgery and reuse.
+		// This does *not* make those guarantees, and likely can not.
+
+		var (
+			service string
+			region  string
+			date    time.Time
+			err     error
+		)
+
+		// Parse the auth header to get the service, region, and date
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			return errors.New("expected request to contain an Authorization header")
+		}
+
+		for _, section := range strings.Split(authHeader, " ") {
+			section = strings.TrimRight(section, ",")
+			keyValuePair := strings.SplitN(section, "=", 2)
+			if len(keyValuePair) != 2 {
+				continue
+			}
+
+			if keyValuePair[0] == "Credential" {
+				credParts := strings.Split(keyValuePair[1], "/")
+				if len(credParts) != 5 {
+					return errors.New("invalid credential in auth header")
+				}
+
+				dateStr := credParts[1]
+				date, err = time.Parse("20060102", dateStr)
+				if err != nil {
+					return err
+				}
+
+				service = credParts[2]
+				region = credParts[3]
+				break
+			}
+		}
+		if timestamp := r.Header.Get("X-Amz-Date"); timestamp != "" {
+			date, err = time.Parse("20060102T150405Z", timestamp)
+			if err != nil {
+				return err
+			}
+		}
+		if service == "" || region == "" || date.IsZero() {
+			return errors.New("expected valid sigv4 authentication header in request to tokenizer")
+		}
+
+		// Strip the Authorization header from the request
+		r.Header.Del("Authorization")
+
+		credentials := aws.Credentials{
+			AccessKeyID:     c.AccessKey,
+			SecretAccessKey: c.SecretKey,
+		}
+
+		// HACK: We have to strip the filtered headers *before* the request gets signed,
+		//       since sigv4 expects a signature of all the request's headers.
+		for _, h := range FilteredHeaders {
+			r.Header.Del(h)
+		}
+		// Remove headers that goproxy will strip out later anyway. Otherwise, the header signature check will fail.
+		// https://github.com/elazarl/goproxy/blob/8b0c205063807802a7ac1d75351a90172a9c83fb/proxy.go#L87-L92
+		r.Header.Del("Accept-Encoding")
+		r.Header.Del("Proxy-Connection")
+		r.Header.Del("Proxy-Authenticate")
+		r.Header.Del("Proxy-Authorization")
+
+		signer := v4.NewSigner()
+		err = signer.SignHTTP(r.Context(), credentials, r, r.Header.Get("X-Amz-Content-Sha256"), service, region, date)
+
+		return err
 	}, nil
 }
 
