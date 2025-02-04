@@ -379,6 +379,11 @@ func errorResponse(err error) *http.Response {
 //   - It forces the upstream connection to be TLS. We want the actual upstream
 //     connection to be over TLS because security.
 func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
+	_, fdaaNet, err := net.ParseCIDR("fdaa::/8")
+	if err != nil {
+		panic(err)
+	}
+
 	netDialer := net.Dialer{}
 
 	baMap := map[string]bool{}
@@ -398,6 +403,12 @@ func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
 			switch ip := net.ParseIP(h); {
 			case ip == nil:
 				return fmt.Errorf("bad ip: %s", address)
+			case ip.IsPrivate():
+				return fmt.Errorf("%w: dialing private address %s denied", ErrBadRequest, address)
+			case ip.IsLoopback():
+				return fmt.Errorf("%w: dialing loopback address %s denied", ErrBadRequest, address)
+			case fdaaNet.Contains(ip):
+				return fmt.Errorf("%w: dialing fdaa::/8 address %s denied", ErrBadRequest, address)
 			case baMap[ip.String()]:
 				return fmt.Errorf("%w: dialing address %s denied", ErrBadRequest, address)
 			default:
