@@ -157,6 +157,12 @@ type proxyUserData struct {
 
 // HandleConnect implements goproxy.FuncHttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+	if host == "" {
+		logrus.Warn("no host in CONNECT request")
+		ctx.Resp = errorResponse(ErrBadRequest)
+		return goproxy.RejectConnect, ""
+	}
+
 	pud := &proxyUserData{
 		connLog:      logrus.WithField("connect_host", host),
 		connectStart: time.Now(),
@@ -364,6 +370,8 @@ func errorResponse(err error) *http.Response {
 	}
 
 	return &http.Response{
+		ProtoMajor: 1,
+		ProtoMinor: 1,
 		StatusCode: status,
 		Body:       io.NopCloser(bytes.NewReader([]byte(err.Error()))),
 		Header:     make(http.Header),
