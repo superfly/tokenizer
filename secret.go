@@ -57,6 +57,7 @@ type wireSecret struct {
 	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
 	*MacaroonAuthConfig        `json:"macaroon_auth,omitempty"`
 	*FlyioMacaroonAuthConfig   `json:"flyio_macaroon_auth,omitempty"`
+	*FlySrcAuthConfig          `json:"fly_src_auth,omitempty"`
 	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
 	AllowHostPattern           string   `json:"allowed_host_pattern,omitempty"`
 }
@@ -71,6 +72,8 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 		ws.MacaroonAuthConfig = a
 	case *FlyioMacaroonAuthConfig:
 		ws.FlyioMacaroonAuthConfig = a
+	case *FlySrcAuthConfig:
+		ws.FlySrcAuthConfig = a
 	default:
 		return nil, errors.New("bad auth config")
 	}
@@ -144,6 +147,10 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	if ws.FlyioMacaroonAuthConfig != nil {
 		na += 1
 		s.AuthConfig = ws.FlyioMacaroonAuthConfig
+	}
+	if ws.FlySrcAuthConfig != nil {
+		na += 1
+		s.AuthConfig = ws.FlySrcAuthConfig
 	}
 	if na != 1 {
 		return errors.New("bad auth config")

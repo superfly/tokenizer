@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/sirupsen/logrus"
@@ -370,6 +371,74 @@ func TestTokenizer(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	})
+
+	t.Run("fly-src auth", func(t *testing.T) {
+		priv := flySrcSignaturePrivateKey(t)
+
+		auth := NewFlySrcAuthConfig(AllowlistFlySrcOrgs("foo"))
+		secret, err := (&Secret{AuthConfig: auth, ProcessorConfig: &InjectProcessorConfig{Token: token}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// Good
+		fs := &flySrc{"foo", "bar", "baz", time.Now().Truncate(time.Second)}
+		hdrSrc := fs.String()
+		hdrSig := fs.sign(priv)
+
+		assert.NoError(t, err)
+		client, err := Client(tkzServer.URL, withHeaders(http.Header{
+			headerFlySrc:          []string{hdrSrc},
+			headerFlySrcSignature: []string{hdrSig},
+		}), WithSecret(secret, nil))
+		assert.NoError(t, err)
+		assert.Equal(t, &echoResponse{
+			Headers: http.Header{
+				"Authorization":       {fmt.Sprintf("Bearer %s", token)},
+				headerFlySrc:          []string{hdrSrc},
+				headerFlySrcSignature: []string{hdrSig},
+			},
+			Body: "",
+		}, doEcho(t, client, req))
+
+		// Bad org
+		fs = &flySrc{"WRONG!", "bar", "baz", time.Now().Truncate(time.Second)}
+		hdrSrc = fs.String()
+		hdrSig = fs.sign(priv)
+
+		assert.NoError(t, err)
+		client, err = Client(tkzServer.URL, withHeaders(http.Header{
+			headerFlySrc:          []string{hdrSrc},
+			headerFlySrcSignature: []string{hdrSig},
+		}), WithSecret(secret, nil))
+		assert.NoError(t, err)
+
+		resp, err = client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+
+		// Missing signature
+		fs = &flySrc{"foo", "bar", "baz", time.Now().Truncate(time.Second)}
+		hdrSrc = fs.String()
+
+		assert.NoError(t, err)
+		client, err = Client(tkzServer.URL, withHeaders(http.Header{headerFlySrc: []string{hdrSrc}}), WithSecret(secret, nil))
+		assert.NoError(t, err)
+
+		resp, err = client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	})
+}
+
+func withHeaders(h http.Header) ClientOption {
+	return func(co *clientOptions) {
+		if co.headers == nil {
+			co.headers = make(http.Header)
+		}
+		for k, v := range h {
+			co.headers[k] = v
+		}
+	}
+
 }
 
 type echoResponse struct {
