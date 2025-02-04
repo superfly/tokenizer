@@ -111,7 +111,19 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 		case r.Host == "":
 			http.Error(w, "must specify host", 400)
 			return
-		case hostnameMap[r.Host]:
+		}
+
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			if strings.Contains(err.Error(), "missing port in address") {
+				host = r.Host
+			} else {
+				http.Error(w, "bad host", 400)
+				return
+			}
+		}
+
+		if hostnameMap[host] {
 			http.Error(w, "circular request", 400)
 			return
 		}
