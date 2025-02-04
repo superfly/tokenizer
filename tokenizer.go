@@ -2,6 +2,7 @@ package tokenizer
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -44,11 +46,38 @@ type tokenizer struct {
 	// OpenProxy dictates whether requests without any sealed secrets are allowed.
 	OpenProxy bool
 
+	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
+	// If provided, this allows tokenizer to transparently proxy requests (ie.
+	// accept normal HTTP requests with arbitrary hostnames) while blocking
+	// circular requests back to itself. Any DNS names for tokenizer as well as
+	// static IP addresses should be included.
+	tokenizerHostnames []string
+
 	priv *[32]byte
 	pub  *[32]byte
 }
 
-func NewTokenizer(openKey string) *tokenizer {
+type Option func(*tokenizer)
+
+// OpenProxy specifies that requests without any sealed secrets are allowed.
+func OpenProxy() Option {
+	return func(t *tokenizer) {
+		t.OpenProxy = true
+	}
+}
+
+// TokenizerHostnames is a list of hostnames where tokenizer can be reached. If
+// provided, this allows tokenizer to transparently proxy requests (ie. accept
+// normal HTTP requests with arbitrary hostnames) while blocking circular
+// requests back to itself. Any DNS names for tokenizer as well as static IP
+// addresses should be included.
+func TokenizerHostnames(hostnames ...string) Option {
+	return func(t *tokenizer) {
+		t.tokenizerHostnames = hostnames
+	}
+}
+
+func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	privBytes, err := hex.DecodeString(openKey)
 	if err != nil {
 		logrus.WithError(err).Panic("bad private key")
@@ -63,12 +92,37 @@ func NewTokenizer(openKey string) *tokenizer {
 	proxy := goproxy.NewProxyHttpServer()
 	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub}
 
+	for _, opt := range opts {
+		opt(tkz)
+	}
+
+	hostnameMap := map[string]bool{}
+	for _, hostname := range tkz.tokenizerHostnames {
+		hostnameMap[hostname] = true
+	}
+
+	// fly-proxy rewrites incoming requests to not include the full URI so we
+	// have to look at the host header.
 	proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "I'm not that kind of server")
+		switch {
+		case len(hostnameMap) == 0:
+			http.Error(w, "I'm not that kind of server", 400)
+			return
+		case r.Host == "":
+			http.Error(w, "must specify host", 400)
+			return
+		case hostnameMap[r.Host]:
+			http.Error(w, "circular request", 400)
+			return
+		}
+
+		r.URL.Scheme = "http"
+		r.URL.Host = r.Host
+		tkz.ServeHTTP(w, r)
 	})
 
 	proxy.Tr = &http.Transport{
-		Dial: forceTLSDialer,
+		Dial: dialFunc(tkz.tokenizerHostnames),
 		// probably not necessary, but I don't want to worry about desync/smuggling
 		DisableKeepAlives: true,
 	}
@@ -316,24 +370,61 @@ func errorResponse(err error) *http.Response {
 	}
 }
 
-func forceTLSDialer(network, addr string) (net.Conn, error) {
-	switch network {
-	case "tcp", "tcp4", "tcp6":
-	default:
-		return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
+// dialFunc returns a function for dialing network addresses. Ours does a few
+// special things.
+//   - It denies connections to the given set of IP addresses. This is to prevent
+//     circular requests back to tokenizer. Invalid IPs are ignored.
+//   - It rejects requests for TLS upstreams. We need to see/modify requests, so
+//     our proxy can't do passthrough TLS.
+//   - It forces the upstream connection to be TLS. We want the actual upstream
+//     connection to be over TLS because security.
+func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
+	netDialer := net.Dialer{}
+
+	baMap := map[string]bool{}
+	for _, ba := range badAddrs {
+		if ip := net.ParseIP(ba); ip != nil {
+			baMap[ip.String()] = true
+		}
 	}
 
-	hostname, port, _ := strings.Cut(addr, ":")
-	if hostname == "" {
-		return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
-	}
-	switch port {
-	case "443":
-		return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
-	case "80", "":
-		port = "443"
-	}
-	addr = fmt.Sprintf("%s:%s", hostname, port)
+	if len(baMap) != 0 {
+		netDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+			h, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
 
-	return tls.Dial("tcp", addr, &tls.Config{RootCAs: UpstreamTrust})
+			switch ip := net.ParseIP(h); {
+			case ip == nil:
+				return fmt.Errorf("bad ip: %s", address)
+			case baMap[ip.String()]:
+				return fmt.Errorf("%w: dialing address %s denied", ErrBadRequest, address)
+			default:
+				return nil
+			}
+		}
+	}
+
+	return func(network, addr string) (net.Conn, error) {
+		switch network {
+		case "tcp", "tcp4", "tcp6":
+		default:
+			return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
+		}
+
+		hostname, port, _ := strings.Cut(addr, ":")
+		if hostname == "" {
+			return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
+		}
+		switch port {
+		case "443":
+			return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
+		case "80", "":
+			port = "443"
+		}
+		addr = fmt.Sprintf("%s:%s", hostname, port)
+
+		return tls.DialWithDialer(&netDialer, network, addr, &tls.Config{RootCAs: UpstreamTrust})
+	}
 }
