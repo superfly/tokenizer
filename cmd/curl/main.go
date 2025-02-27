@@ -65,14 +65,16 @@ func doGenerateSecret(secretToken string) {
 		sealKey        = mustGetEnv("SEAL_KEY")
 		authToken      = os.Getenv("AUTH_TOKEN")
 		hexMacaroonKey = os.Getenv("MACAROON_KEY")
+		noAuth         = os.Getenv("NO_AUTH")
 	)
 
-	if authToken != "" && hexMacaroonKey != "" {
-		fatalln("cannot specify AUTH_TOKEN and MACAROON_KEY")
+	if authToken != "" && hexMacaroonKey != "" && noAuth != "" {
+		fatalln("only specify one of AUTH_TOKEN, MACAROON_KEY, or NO_AUTH")
 	}
 
 	var authConfig tokenizer.AuthConfig
-	if hexMacaroonKey != "" {
+	switch {
+	case hexMacaroonKey != "":
 		key, err := hex.DecodeString(hexMacaroonKey)
 		if err != nil {
 			fatalf("MACAROON_KEY must be hex encoded: %s", err)
@@ -90,7 +92,9 @@ func doGenerateSecret(secretToken string) {
 
 		authToken = macaroon.ToAuthorizationHeader(tok)
 		authConfig = tokenizer.NewMacaroonAuthConfig(key)
-	} else {
+	case noAuth != "":
+		authConfig = &tokenizer.NoAuthConfig{}
+	default:
 		if authToken == "" {
 			authToken = randHex(8)
 		}
@@ -109,7 +113,11 @@ func doGenerateSecret(secretToken string) {
 		fatalf("seal secret: %s", err)
 	}
 
-	fmt.Printf("export AUTH_TOKEN=\"%s\"\nexport SEALED_SECRET=\"%s\"\n", authToken, sealedSecret)
+	if authToken != "" {
+		fmt.Printf("export AUTH_TOKEN=\"%s\"\n", authToken)
+	}
+
+	fmt.Printf("export SEALED_SECRET=\"%s\"\n", sealedSecret)
 	os.Exit(0)
 }
 
