@@ -79,15 +79,21 @@ func runServe() {
 		os.Exit(1)
 	}
 
-	tkz := tokenizer.NewTokenizer(key)
+	opts := []tokenizer.Option{}
+
+	if hn := os.Getenv("TOKENIZER_HOSTNAMES"); hn != "" {
+		opts = append(opts, tokenizer.TokenizerHostnames(strings.Split(hn, ",")...))
+	}
+
+	if slices.Contains([]string{"1", "true"}, os.Getenv("OPEN_PROXY")) {
+		opts = append(opts, tokenizer.OpenProxy())
+	}
+
+	tkz := tokenizer.NewTokenizer(key, opts...)
 
 	if len(os.Getenv("DEBUG")) != 0 {
 		tkz.ProxyHttpServer.Verbose = true
 		tkz.ProxyHttpServer.Logger = logrus.StandardLogger()
-	}
-
-	if slices.Contains([]string{"1", "true"}, os.Getenv("OPEN_PROXY")) {
-		tkz.OpenProxy = true
 	}
 
 	server := &http.Server{Handler: tkz}

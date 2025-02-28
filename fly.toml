@@ -10,12 +10,24 @@ internal_port = 8080
 processes = ["app"]
 protocol = "tcp"
 
+# tcp passthrough
 [[services.ports]]
 port = 80
 
+# tls passthrough
 [[services.ports]]
 handlers = ["tls"]
 port = 443
+
+# http via fly-proxy
+[[services.ports]]
+handlers = ["http"]
+port = 8080
+
+# https via fly-proxy
+[[services.ports]]
+handlers = ["tls", "http"]
+port = 8443
 
 [[services.tcp_checks]]
 grace_period = "1s"

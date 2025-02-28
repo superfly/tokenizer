@@ -341,6 +341,14 @@ func readFlySrcKey(path string) ed25519.PublicKey {
 	return key
 }
 
+type NoAuthConfig struct{}
+
+var _ AuthConfig = (*NoAuthConfig)(nil)
+
+func (c *NoAuthConfig) AuthRequest(req *http.Request) error {
+	return nil
+}
+
 func proxyAuthorizationTokens(req *http.Request) (ret []string) {
 hdrLoop:
 	for _, hdr := range req.Header.Values(headerProxyAuthorization) {
