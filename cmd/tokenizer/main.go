@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/superfly/macaroon"
 	"github.com/superfly/tokenizer"
 	"golang.org/x/exp/slices"
 )
@@ -87,6 +89,17 @@ func runServe() {
 
 	if slices.Contains([]string{"1", "true"}, os.Getenv("OPEN_PROXY")) {
 		opts = append(opts, tokenizer.OpenProxy())
+	}
+
+	tpKeyHex := os.Getenv("TP_KEY")
+	tpLoc := os.Getenv("TP_LOCATION")
+	if tpKeyHex != "" && tpLoc != "" {
+		tpKey, err := hex.DecodeString(tpKeyHex)
+		if err != nil || len(tpKey) != macaroon.EncryptionKeySize {
+			logrus.WithError(err).Fatal("invalid TP_KEY")
+		}
+
+		opts = append(opts, tokenizer.MacaroonThirdParty(tpLoc, tpKey))
 	}
 
 	tkz := tokenizer.NewTokenizer(key, opts...)

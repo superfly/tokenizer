@@ -3,6 +3,7 @@ package tokenizer
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -23,9 +24,14 @@ import (
 	"github.com/alecthomas/assert/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/macaroon"
+	"github.com/superfly/macaroon/bundle"
+	"github.com/superfly/macaroon/flyio"
+	"github.com/superfly/macaroon/resset"
+	"github.com/superfly/macaroon/tp"
 	"github.com/superfly/tokenizer/flysrc"
 	tkmac "github.com/superfly/tokenizer/macaroon"
 	"golang.org/x/crypto/nacl/box"
+	"golang.org/x/exp/constraints"
 )
 
 func TestTokenizer(t *testing.T) {
@@ -75,6 +81,17 @@ func TestTokenizer(t *testing.T) {
 	resp, err = client.Get(appURL)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	tkz.tp = &thirdParty{&tp.TP{
+		Location: tkzServer.URL,
+		Key:      macaroon.NewEncryptionKey(),
+		Log:      logrus.StandardLogger(),
+	}}
+
+	// configuring tp makes it an open proxy
+	resp, err = client.Get(appURL)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	t.Run("inject processor", func(t *testing.T) {
 		auth := "trustno1"
@@ -435,6 +452,56 @@ func TestTokenizer(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	})
+
+	t.Run("macaroon third party", func(t *testing.T) {
+		ctx := context.Background()
+		kid := []byte("root")
+		mk := macaroon.NewSigningKey()
+
+		// mint macaroon with tp cav
+		m, err := macaroon.New(kid, flyio.LocationPermission, mk)
+		assert.NoError(t, err)
+		assert.NoError(t, m.Add(&flyio.Organization{ID: 1}))
+		assert.NoError(t, m.Add3P(tkz.tp.Key, tkz.tp.Location, &flyio.FromMachine{ID: "foo"}))
+		tok, err := m.String()
+		assert.NoError(t, err)
+		hdr := "FlyV1 " + tok
+
+		// get "fake" discharge and verify that token has no permissions
+		withFakeDis, err := tp.NewClient(flyio.LocationPermission).FetchDischargeTokens(ctx, hdr)
+		assert.NoError(t, err)
+		bun, err := flyio.ParseBundle(withFakeDis)
+		assert.NoError(t, err)
+		_, err = bun.Verify(ctx, bundle.WithKey(kid, mk, nil))
+		assert.NoError(t, err)
+		err = bun.Validate(&flyio.Access{OrgID: uptr(1), Action: resset.ActionRead})
+		assert.IsError(t, err, resset.ErrUnauthorizedForAction)
+
+		// without good fly-src, doesn't modify request
+		hdrs := http.Header{"Authorization": {hdr}}
+		client, err = Client(tkzServer.URL, withHeaders(hdrs))
+		assert.NoError(t, err)
+		echo := doEcho(t, client, req)
+		assert.Equal(t, hdr, echo.Headers.Get("Authorization"))
+
+		// without good fly-src, doesn't modify request
+		fs := &flysrc.Parsed{Org: "org", App: "app", Instance: "WRONG", Timestamp: time.Now().Truncate(time.Second)}
+		hdrs.Set("Fly-Src", fs.String())
+		hdrs.Set("Fly-Src-Signature", fs.Sign(flySrcSignKey(t)))
+		client, err = Client(tkzServer.URL, withHeaders(hdrs))
+		assert.NoError(t, err)
+		echo = doEcho(t, client, req)
+		assert.Equal(t, hdr, echo.Headers.Get("Authorization"))
+
+		// with good fly-src, injects real discharge
+		fs = &flysrc.Parsed{Org: "org", App: "app", Instance: "foo", Timestamp: time.Now().Truncate(time.Second)}
+		hdrs.Set("Fly-Src", fs.String())
+		hdrs.Set("Fly-Src-Signature", fs.Sign(flySrcSignKey(t)))
+		client, err = Client(tkzServer.URL, withHeaders(hdrs))
+		assert.NoError(t, err)
+		echo = doEcho(t, client, req)
+		assert.NotEqual(t, hdr, echo.Headers.Get("Authorization"))
+	})
 }
 
 func withHeaders(h http.Header) ClientOption {
@@ -503,4 +570,9 @@ func flySrcSignKey(t *testing.T) ed25519.PrivateKey {
 	assert.NoError(t, err)
 	assert.NotZero(t, _flySrcsignKey)
 	return _flySrcsignKey
+}
+
+func uptr[T constraints.Integer](t T) *uint64 {
+	v := uint64(t)
+	return &v
 }

@@ -20,6 +20,8 @@ import (
 
 	"github.com/elazarl/goproxy"
 	"github.com/sirupsen/logrus"
+	"github.com/superfly/macaroon"
+	"github.com/superfly/macaroon/tp"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/exp/maps"
@@ -53,6 +55,8 @@ type tokenizer struct {
 	// static IP addresses should be included.
 	tokenizerHostnames []string
 
+	tp *thirdParty
+
 	priv *[32]byte
 	pub  *[32]byte
 }
@@ -74,6 +78,22 @@ func OpenProxy() Option {
 func TokenizerHostnames(hostnames ...string) Option {
 	return func(t *tokenizer) {
 		t.tokenizerHostnames = hostnames
+	}
+}
+
+// MacaroonThirdParty configures tokenizer as a discharge service that forces
+// macaroons to be used via the tokenizer. This allows you to add a third-party
+// caveat to macaroons, pointing at the tokenizer. The tokenizer implements the
+// tp discharge protocol, but gives discharge tokens that strip all permissions
+// from the macaroon. However, if a proxied request contains macaroons with our
+// tp caveat, we give a real discharge and add that to the proxied request.
+func MacaroonThirdParty(location string, key macaroon.EncryptionKey) Option {
+	return func(t *tokenizer) {
+		t.tp = &thirdParty{&tp.TP{
+			Location: location,
+			Key:      key,
+			Log:      logrus.StandardLogger(),
+		}}
 	}
 }
 
@@ -104,6 +124,11 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	// fly-proxy rewrites incoming requests to not include the full URI so we
 	// have to look at the host header.
 	proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tkz.tp.isDischargeRequest(r) {
+			tkz.tp.serveFakeDischarge(w, r)
+			return
+		}
+
 		switch {
 		case len(hostnameMap) == 0:
 			http.Error(w, "I'm not that kind of server", 400)
@@ -224,6 +249,8 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		"queryKeys": strings.Join(maps.Keys(req.URL.Query()), ", "),
 	})
 
+	t.tp.injectRealDischarge(req, pud.reqLog)
+
 	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
 	if reqProcessors, err := t.processorsFromRequest(req); err != nil {
 		pud.reqLog.WithError(err).Warn("find processor")
@@ -232,7 +259,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		processors = append(processors, reqProcessors...)
 	}
 
-	if len(processors) == 0 && !t.OpenProxy {
+	if len(processors) == 0 && !t.OpenProxy && t.tp == nil {
 		pud.reqLog.Warn("no processors")
 		return nil, errorResponse(ErrBadRequest)
 	}
