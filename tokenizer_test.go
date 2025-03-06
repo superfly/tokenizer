@@ -3,6 +3,7 @@ package tokenizer
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,12 +16,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alecthomas/assert/v2"
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/macaroon"
+	"github.com/superfly/tokenizer/flysrc"
 	tkmac "github.com/superfly/tokenizer/macaroon"
 	"golang.org/x/crypto/nacl/box"
 )
@@ -373,16 +376,21 @@ func TestTokenizer(t *testing.T) {
 	})
 
 	t.Run("fly-src auth", func(t *testing.T) {
-		priv := flySrcSignaturePrivateKey(t)
+		const (
+			headerFlySrc          = "Fly-Src"
+			headerFlySrcSignature = "Fly-Src-Signature"
+		)
+
+		priv := flySrcSignKey(t)
 
 		auth := NewFlySrcAuthConfig(AllowlistFlySrcOrgs("foo"))
 		secret, err := (&Secret{AuthConfig: auth, ProcessorConfig: &InjectProcessorConfig{Token: token}}).Seal(sealKey)
 		assert.NoError(t, err)
 
 		// Good
-		fs := &flySrc{"foo", "bar", "baz", time.Now().Truncate(time.Second)}
+		fs := &flysrc.Parsed{Org: "foo", App: "bar", Instance: "baz", Timestamp: time.Now().Truncate(time.Second)}
 		hdrSrc := fs.String()
-		hdrSig := fs.sign(priv)
+		hdrSig := fs.Sign(priv)
 
 		assert.NoError(t, err)
 		client, err := Client(tkzServer.URL, withHeaders(http.Header{
@@ -400,9 +408,9 @@ func TestTokenizer(t *testing.T) {
 		}, doEcho(t, client, req))
 
 		// Bad org
-		fs = &flySrc{"WRONG!", "bar", "baz", time.Now().Truncate(time.Second)}
+		fs = &flysrc.Parsed{Org: "WRONG!", App: "bar", Instance: "baz", Timestamp: time.Now().Truncate(time.Second)}
 		hdrSrc = fs.String()
-		hdrSig = fs.sign(priv)
+		hdrSig = fs.Sign(priv)
 
 		assert.NoError(t, err)
 		client, err = Client(tkzServer.URL, withHeaders(http.Header{
@@ -416,7 +424,7 @@ func TestTokenizer(t *testing.T) {
 		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 
 		// Missing signature
-		fs = &flySrc{"foo", "bar", "baz", time.Now().Truncate(time.Second)}
+		fs = &flysrc.Parsed{Org: "foo", App: "bar", Instance: "baz", Timestamp: time.Now().Truncate(time.Second)}
 		hdrSrc = fs.String()
 
 		assert.NoError(t, err)
@@ -476,4 +484,23 @@ func hmacSHA256(t testing.TB, key []byte, msg string) []byte {
 	_, err := hm.Write([]byte(msg))
 	assert.NoError(t, err)
 	return hm.Sum(nil)
+}
+
+var (
+	_setupFlySrcSignKey sync.Once
+	_flySrcsignKey      ed25519.PrivateKey
+)
+
+func flySrcSignKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+
+	var err error
+
+	_setupFlySrcSignKey.Do(func() {
+		flysrc.VerifyKey, _flySrcsignKey, err = ed25519.GenerateKey(nil)
+	})
+
+	assert.NoError(t, err)
+	assert.NotZero(t, _flySrcsignKey)
+	return _flySrcsignKey
 }

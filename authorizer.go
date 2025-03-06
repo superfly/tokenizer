@@ -1,17 +1,13 @@
 package tokenizer
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,21 +16,15 @@ import (
 	"github.com/superfly/macaroon/bundle"
 	"github.com/superfly/macaroon/flyio"
 	"github.com/superfly/macaroon/flyio/machinesapi"
+	"github.com/superfly/tokenizer/flysrc"
 	tkmac "github.com/superfly/tokenizer/macaroon"
 	"golang.org/x/exp/slices"
 )
 
 const (
 	headerProxyAuthorization = "Proxy-Authorization"
-	headerFlySrc             = "Fly-Src"
-	headerFlySrcSignature    = "Fly-Src-Signature"
-	flySrcSignatureKeyPath   = "/.fly/fly-src.pub"
 
 	maxFlySrcAge = 30 * time.Second
-)
-
-var (
-	flySrcSignatureKey = readFlySrcKey(flySrcSignatureKeyPath)
 )
 
 type AuthConfig interface {
@@ -213,7 +203,7 @@ func NewFlySrcAuthConfig(opts ...FlySrcOpt) *FlySrcAuthConfig {
 var _ AuthConfig = (*FlySrcAuthConfig)(nil)
 
 func (c *FlySrcAuthConfig) AuthRequest(req *http.Request) error {
-	fs, err := flySrcFromRequest(req)
+	fs, err := flysrc.FromRequest(req)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotAuthorized, err)
 	}
@@ -231,114 +221,6 @@ func (c *FlySrcAuthConfig) AuthRequest(req *http.Request) error {
 	}
 
 	return nil
-}
-
-type flySrc struct {
-	Org       string
-	App       string
-	Instance  string
-	Timestamp time.Time
-}
-
-func flySrcFromRequest(req *http.Request) (*flySrc, error) {
-	srcHdr := req.Header.Get(headerFlySrc)
-	if srcHdr == "" {
-		return nil, errors.New("missing Fly-Src header")
-	}
-
-	sigHdr := req.Header.Get(headerFlySrcSignature)
-	if sigHdr == "" {
-		return nil, errors.New("missing Fly-Src signature")
-	}
-
-	return verifyAndParseFlySrc(srcHdr, sigHdr, flySrcSignatureKey)
-}
-
-func verifyAndParseFlySrc(srcHdr, sigHdr string, key ed25519.PublicKey) (*flySrc, error) {
-	sig, err := base64.StdEncoding.DecodeString(sigHdr)
-	if err != nil {
-		return nil, fmt.Errorf("bad Fly-Src signature: %w", err)
-	}
-
-	if !ed25519.Verify(key, []byte(srcHdr), sig) {
-		return nil, errors.New("bad Fly-Src signature")
-	}
-
-	fs, err := parseFlySrc(srcHdr)
-	if err != nil {
-		return nil, fmt.Errorf("bad Fly-Src header: %w", err)
-	}
-
-	if fs.age() > maxFlySrcAge {
-		return nil, fmt.Errorf("expired Fly-Src header")
-	}
-
-	return fs, nil
-}
-
-func parseFlySrc(hdr string) (*flySrc, error) {
-	var ret flySrc
-
-	parts := strings.Split(hdr, ";")
-	if n := len(parts); n != 4 {
-		return nil, fmt.Errorf("malformed Fly-Src header (%d parts)", n)
-	}
-
-	for _, part := range parts {
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			return nil, fmt.Errorf("malformed Fly-Src header (missing =)")
-		}
-
-		switch k {
-		case "org":
-			ret.Org = v
-		case "app":
-			ret.App = v
-		case "instance":
-			ret.Instance = v
-		case "ts":
-			tsi, err := strconv.Atoi(v)
-			if err != nil {
-				return nil, fmt.Errorf("malformed Fly-Src timestamp: %w", err)
-			}
-
-			ret.Timestamp = time.Unix(int64(tsi), 0)
-		default:
-			return nil, fmt.Errorf("malformed Fly-Src header (unknown key: %q)", k)
-		}
-	}
-
-	if ret.Org == "" || ret.App == "" || ret.Instance == "" || ret.Timestamp.IsZero() {
-		return nil, fmt.Errorf("malformed Fly-Src header (missing parts)")
-	}
-
-	return &ret, nil
-}
-
-func (fs *flySrc) age() time.Duration {
-	return time.Since(fs.Timestamp)
-}
-
-func readFlySrcKey(path string) ed25519.PublicKey {
-	hk, err := os.ReadFile(path)
-	if err != nil {
-		logrus.WithError(err).Warn("failed to read Fly-Src public key")
-		return nil
-	}
-
-	if size := len(hk); hex.DecodedLen(size) != ed25519.PublicKeySize {
-		logrus.WithField("size", size).Warn("bad Fly-Src public key size")
-		return nil
-	}
-
-	key := make(ed25519.PublicKey, ed25519.PublicKeySize)
-	if _, err := hex.Decode(key, hk); err != nil {
-		logrus.WithError(err).Warn("bad Fly-Src public key")
-		return nil
-	}
-
-	return key
 }
 
 type NoAuthConfig struct{}
