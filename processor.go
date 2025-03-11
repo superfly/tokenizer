@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/hmac"
 	_ "crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,62 @@ type RequestProcessor func(r *http.Request) error
 
 type ProcessorConfig interface {
 	Processor(map[string]string) (RequestProcessor, error)
+}
+
+type wireProcessor struct {
+	InjectProcessorConfig     *InjectProcessorConfig     `json:"inject_processor,omitempty"`
+	InjectHMACProcessorConfig *InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
+	OAuthProcessorConfig      *OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
+	Sigv4ProcessorConfig      *Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
+	MultiProcessorConfig      *MultiProcessorConfig      `json:"multi_processor,omitempty"`
+}
+
+func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
+	switch p := p.(type) {
+	case *InjectProcessorConfig:
+		return wireProcessor{InjectProcessorConfig: p}, nil
+	case *InjectHMACProcessorConfig:
+		return wireProcessor{InjectHMACProcessorConfig: p}, nil
+	case *OAuthProcessorConfig:
+		return wireProcessor{OAuthProcessorConfig: p}, nil
+	case *Sigv4ProcessorConfig:
+		return wireProcessor{Sigv4ProcessorConfig: p}, nil
+	case *MultiProcessorConfig:
+		return wireProcessor{MultiProcessorConfig: p}, nil
+	default:
+		return wireProcessor{}, errors.New("bad processor config")
+	}
+}
+
+func (wp *wireProcessor) getProcessorConfig() (ProcessorConfig, error) {
+	var p ProcessorConfig
+
+	var np int
+	if wp.InjectProcessorConfig != nil {
+		np += 1
+		p = wp.InjectProcessorConfig
+	}
+	if wp.InjectHMACProcessorConfig != nil {
+		np += 1
+		p = wp.InjectHMACProcessorConfig
+	}
+	if wp.OAuthProcessorConfig != nil {
+		np += 1
+		p = wp.OAuthProcessorConfig
+	}
+	if wp.Sigv4ProcessorConfig != nil {
+		np += 1
+		p = wp.Sigv4ProcessorConfig
+	}
+	if wp.MultiProcessorConfig != nil {
+		np += 1
+		p = wp.MultiProcessorConfig
+	}
+	if np != 1 {
+		return nil, errors.New("bad processor config")
+	}
+
+	return p, nil
 }
 
 type InjectProcessorConfig struct {
@@ -240,6 +297,63 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 
 		return err
 	}, nil
+}
+
+type MultiProcessorConfig []ProcessorConfig
+
+var _ ProcessorConfig = new(MultiProcessorConfig)
+
+func (c MultiProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	var processors []RequestProcessor
+	for _, cfg := range c {
+		proc, err := cfg.Processor(params)
+		if err != nil {
+			return nil, err
+		}
+		processors = append(processors, proc)
+	}
+
+	return func(r *http.Request) error {
+		for _, proc := range processors {
+			if err := proc(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil
+}
+
+func (c MultiProcessorConfig) MarshalJSON() ([]byte, error) {
+	wps := make([]wireProcessor, 0, len(c))
+	for _, p := range c {
+		wp, err := newWireProcessor(p)
+		if err != nil {
+			return nil, err
+		}
+		wps = append(wps, wp)
+	}
+
+	return json.Marshal(wps)
+}
+
+func (c *MultiProcessorConfig) UnmarshalJSON(b []byte) error {
+	var wps []wireProcessor
+	if err := json.Unmarshal(b, &wps); err != nil {
+		return err
+	}
+	if len(wps) == 0 {
+		return nil
+	}
+
+	for _, wp := range wps {
+		cfg, err := wp.getProcessorConfig()
+		if err != nil {
+			return err
+		}
+		*c = append(*c, cfg)
+	}
+
+	return nil
 }
 
 // A helper type to be embedded in RequestProcessors wanting to use the `fmt` config/param.
