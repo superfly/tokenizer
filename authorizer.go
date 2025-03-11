@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -29,6 +30,62 @@ const (
 
 type AuthConfig interface {
 	AuthRequest(req *http.Request) error
+}
+
+type wireAuth struct {
+	BearerAuthConfig        *BearerAuthConfig        `json:"bearer_auth,omitempty"`
+	MacaroonAuthConfig      *MacaroonAuthConfig      `json:"macaroon_auth,omitempty"`
+	FlyioMacaroonAuthConfig *FlyioMacaroonAuthConfig `json:"flyio_macaroon_auth,omitempty"`
+	FlySrcAuthConfig        *FlySrcAuthConfig        `json:"fly_src_auth,omitempty"`
+	NoAuthConfig            *NoAuthConfig            `json:"no_auth,omitempty"`
+}
+
+func newWireAuth(ac AuthConfig) (wireAuth, error) {
+	switch a := ac.(type) {
+	case *BearerAuthConfig:
+		return wireAuth{BearerAuthConfig: a}, nil
+	case *MacaroonAuthConfig:
+		return wireAuth{MacaroonAuthConfig: a}, nil
+	case *FlyioMacaroonAuthConfig:
+		return wireAuth{FlyioMacaroonAuthConfig: a}, nil
+	case *FlySrcAuthConfig:
+		return wireAuth{FlySrcAuthConfig: a}, nil
+	case *NoAuthConfig:
+		return wireAuth{NoAuthConfig: a}, nil
+	default:
+		return wireAuth{}, fmt.Errorf("bad auth config: %T", ac)
+	}
+}
+
+func (wa *wireAuth) getAuthConfig() (AuthConfig, error) {
+	var ac AuthConfig
+
+	var na int
+	if wa.BearerAuthConfig != nil {
+		na += 1
+		ac = wa.BearerAuthConfig
+	}
+	if wa.MacaroonAuthConfig != nil {
+		na += 1
+		ac = wa.MacaroonAuthConfig
+	}
+	if wa.FlyioMacaroonAuthConfig != nil {
+		na += 1
+		ac = wa.FlyioMacaroonAuthConfig
+	}
+	if wa.FlySrcAuthConfig != nil {
+		na += 1
+		ac = wa.FlySrcAuthConfig
+	}
+	if wa.NoAuthConfig != nil {
+		na += 1
+		ac = wa.NoAuthConfig
+	}
+	if na != 1 {
+		return nil, errors.New("bad auth config")
+	}
+
+	return ac, nil
 }
 
 type BearerAuthConfig struct {

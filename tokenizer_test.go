@@ -435,6 +435,43 @@ func TestTokenizer(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	})
+
+	t.Run("MultiProcessor", func(t *testing.T) {
+		auth := "trustno1"
+		token1 := "supersecret"
+		token2 := "extrasecret"
+		pc := &MultiProcessorConfig{
+			&InjectProcessorConfig{Token: token1, DstProcessor: DstProcessor{Dst: "A"}},
+			&InjectProcessorConfig{Token: token2, DstProcessor: DstProcessor{Dst: "B"}},
+		}
+		secret, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth), ProcessorConfig: pc}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// no auth
+		client, err = Client(tkzServer.URL, WithSecret(secret, nil))
+		assert.NoError(t, err)
+		resp, err = client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+
+		// bad auth
+		client, err = Client(tkzServer.URL, WithSecret(secret, nil), WithAuth("bogus"))
+		assert.NoError(t, err)
+		resp, err = client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+
+		// happy path
+		client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+		assert.NoError(t, err)
+		assert.Equal(t, &echoResponse{
+			Headers: http.Header{
+				"A": {fmt.Sprintf("Bearer %s", token1)},
+				"B": {fmt.Sprintf("Bearer %s", token2)},
+			},
+			Body: "",
+		}, doEcho(t, client, req))
+	})
 }
 
 func withHeaders(h http.Header) ClientOption {

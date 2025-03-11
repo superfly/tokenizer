@@ -50,48 +50,24 @@ func (s *Secret) sealRaw(key *[32]byte) (string, error) {
 }
 
 type wireSecret struct {
-	*InjectProcessorConfig     `json:"inject_processor,omitempty"`
-	*InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
-	*OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
-	*Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
-	*BearerAuthConfig          `json:"bearer_auth,omitempty"`
-	*MacaroonAuthConfig        `json:"macaroon_auth,omitempty"`
-	*FlyioMacaroonAuthConfig   `json:"flyio_macaroon_auth,omitempty"`
-	*FlySrcAuthConfig          `json:"fly_src_auth,omitempty"`
-	*NoAuthConfig              `json:"no_auth,omitempty"`
-	AllowHosts                 []string `json:"allowed_hosts,omitempty"`
-	AllowHostPattern           string   `json:"allowed_host_pattern,omitempty"`
+	wireProcessor
+	wireAuth
+	AllowHosts       []string `json:"allowed_hosts,omitempty"`
+	AllowHostPattern string   `json:"allowed_host_pattern,omitempty"`
 }
 
 func (s *Secret) MarshalJSON() ([]byte, error) {
-	ws := wireSecret{}
+	var (
+		ws  wireSecret
+		err error
+	)
 
-	switch a := s.AuthConfig.(type) {
-	case *BearerAuthConfig:
-		ws.BearerAuthConfig = a
-	case *MacaroonAuthConfig:
-		ws.MacaroonAuthConfig = a
-	case *FlyioMacaroonAuthConfig:
-		ws.FlyioMacaroonAuthConfig = a
-	case *FlySrcAuthConfig:
-		ws.FlySrcAuthConfig = a
-	case *NoAuthConfig:
-		ws.NoAuthConfig = a
-	default:
-		return nil, errors.New("bad auth config")
+	if ws.wireAuth, err = newWireAuth(s.AuthConfig); err != nil {
+		return nil, err
 	}
 
-	switch p := s.ProcessorConfig.(type) {
-	case *InjectProcessorConfig:
-		ws.InjectProcessorConfig = p
-	case *InjectHMACProcessorConfig:
-		ws.InjectHMACProcessorConfig = p
-	case *OAuthProcessorConfig:
-		ws.OAuthProcessorConfig = p
-	case *Sigv4ProcessorConfig:
-		ws.Sigv4ProcessorConfig = p
-	default:
-		return nil, errors.New("bad processor config")
+	if ws.wireProcessor, err = newWireProcessor(s.ProcessorConfig); err != nil {
+		return nil, err
 	}
 
 	for _, v := range s.RequestValidators {
@@ -112,55 +88,21 @@ func (s *Secret) MarshalJSON() ([]byte, error) {
 }
 
 func (s *Secret) UnmarshalJSON(b []byte) error {
-	ws := wireSecret{}
+	var (
+		ws  wireSecret
+		err error
+	)
+
 	if err := json.Unmarshal(b, &ws); err != nil {
 		return err
 	}
 
-	var np int
-	if ws.InjectProcessorConfig != nil {
-		np += 1
-		s.ProcessorConfig = ws.InjectProcessorConfig
-	}
-	if ws.InjectHMACProcessorConfig != nil {
-		np += 1
-		s.ProcessorConfig = ws.InjectHMACProcessorConfig
-	}
-	if ws.OAuthProcessorConfig != nil {
-		np += 1
-		s.ProcessorConfig = ws.OAuthProcessorConfig
-	}
-	if ws.Sigv4ProcessorConfig != nil {
-		np += 1
-		s.ProcessorConfig = ws.Sigv4ProcessorConfig
-	}
-	if np != 1 {
-		return errors.New("bad processor config")
+	if s.ProcessorConfig, err = ws.wireProcessor.getProcessorConfig(); err != nil {
+		return err
 	}
 
-	var na int
-	if ws.BearerAuthConfig != nil {
-		na += 1
-		s.AuthConfig = ws.BearerAuthConfig
-	}
-	if ws.MacaroonAuthConfig != nil {
-		na += 1
-		s.AuthConfig = ws.MacaroonAuthConfig
-	}
-	if ws.FlyioMacaroonAuthConfig != nil {
-		na += 1
-		s.AuthConfig = ws.FlyioMacaroonAuthConfig
-	}
-	if ws.FlySrcAuthConfig != nil {
-		na += 1
-		s.AuthConfig = ws.FlySrcAuthConfig
-	}
-	if ws.NoAuthConfig != nil {
-		na += 1
-		s.AuthConfig = ws.NoAuthConfig
-	}
-	if na != 1 {
-		return errors.New("bad auth config")
+	if s.AuthConfig, err = ws.wireAuth.getAuthConfig(); err != nil {
+		return err
 	}
 
 	if ws.AllowHosts != nil {
