@@ -9,6 +9,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 COPY VERSION ./
 COPY *.go ./
 COPY ./macaroon ./macaroon
+COPY ./flysrc ./flysrc
 COPY ./cmd/tokenizer ./cmd/tokenizer
 RUN --mount=type=cache,target=/root/.cache/go-build \
 	--mount=type=cache,target=/go/pkg \
