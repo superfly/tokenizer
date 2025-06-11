@@ -1,42 +1,60 @@
-# placeholder
+# fly.toml app configuration file generated for mcp-tokenizer on 2025-04-15T20:58:45-05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-kill_signal = "SIGINT"
-kill_timeout = 5
-processes = []
+app = 'mcp-tokenizer'
+primary_region = 'ord'
+kill_signal = 'SIGINT'
+kill_timeout = '5s'
+
+[env]
+  LISTEN_ADDRESS = ":8080"
+  OPEN_PROXY = true
 
 [experimental]
-auto_rollback = true
+  auto_rollback = true
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
 
 [[services]]
-internal_port = 8080
-processes = ["app"]
-protocol = "tcp"
+  protocol = 'tcp'
+  internal_port = 8080
+  processes = ['app']
 
-# tcp passthrough
-[[services.ports]]
-port = 80
+  [[services.ports]]
+    port = 80
 
-# tls passthrough
-[[services.ports]]
-handlers = ["tls"]
-port = 443
+  [[services.ports]]
+    port = 443
+    handlers = ['tls']
 
-# http via fly-proxy
-[[services.ports]]
-handlers = ["http"]
-port = 8080
+  [[services.ports]]
+    port = 8080
+    handlers = ['http']
 
-# https via fly-proxy
-[[services.ports]]
-handlers = ["tls", "http"]
-port = 8443
+  [[services.ports]]
+    port = 8443
+    handlers = ['tls', 'http']
 
-[[services.tcp_checks]]
-grace_period = "1s"
-interval = "15s"
-restart_limit = 0
-timeout = "2s"
+  [services.concurrency]
+    type = 'connections'
+    soft_limit = 500
 
-[services.concurrency]
-type = "connections"
-soft_limit = 500
+#  [[services.tcp_checks]]
+#    interval = '15s'
+#    timeout = '2s'
+#    grace_period = '1s'
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
