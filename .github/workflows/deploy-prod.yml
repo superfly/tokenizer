@@ -1,0 +1,22 @@
+name: deploy-prod-tokenizer
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    tags: [ "prod.tokenizer.*"]
+
+jobs:
+  deploy:
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-tokenizer
+    uses: mkmba-nz/github-infra/.github/workflows/deploy-to-ecs.yml@HEAD
+    secrets: inherit
+    with:
+      region: us-east-2
+      cluster-name: prod
+      repo-name: tokenizer
+      task-family: prod-tokenizer
+      service-name: prod-tokenizer
+      deployed-to-env: prod

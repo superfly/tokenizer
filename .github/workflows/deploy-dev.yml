@@ -1,0 +1,43 @@
+name: deploy-dev-tokenizer
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Go
+        uses: mkmba-nz/github-infra/actions/setup-go@HEAD
+        with:
+          dockerfile: Dockerfile
+      - run: go test -v ./...
+
+  build-and-push-tokenizer:
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    uses: mkmba-nz/github-infra/.github/workflows/build-and-push.yml@HEAD
+    secrets: inherit
+    with:
+      repo-name: tokenizer
+      context: .
+
+  deploy-tokenizer:
+      needs: build-and-push-tokenizer
+      concurrency:
+        group: ${{ github.workflow }}-${{ github.ref }}
+      uses: mkmba-nz/github-infra/.github/workflows/deploy-to-ecs.yml@HEAD
+      secrets: inherit
+      with:
+        region: ap-southeast-2
+        cluster-name: dev
+        repo-name: tokenizer
+        task-family: dev-tokenizer
+        service-name: dev-tokenizer
