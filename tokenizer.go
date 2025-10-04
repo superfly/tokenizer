@@ -23,6 +23,8 @@ import (
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/exp/maps"
+
+	"github.com/superfly/tokenizer/flysrc"
 )
 
 var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
@@ -46,6 +48,9 @@ type tokenizer struct {
 	// OpenProxy dictates whether requests without any sealed secrets are allowed.
 	OpenProxy bool
 
+	// RequireFlySrc will reject requests without a fly-src when set.
+	RequireFlySrc bool
+
 	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
 	// If provided, this allows tokenizer to transparently proxy requests (ie.
 	// accept normal HTTP requests with arbitrary hostnames) while blocking
@@ -63,6 +68,13 @@ type Option func(*tokenizer)
 func OpenProxy() Option {
 	return func(t *tokenizer) {
 		t.OpenProxy = true
+	}
+}
+
+// RequireFlySrc specifies that requests without a fly-src will be rejected.
+func RequireFlySrc() Option {
+	return func(t *tokenizer) {
+		t.RequireFlySrc = true
 	}
 }
 
@@ -223,6 +235,21 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		"path":      req.URL.Path,
 		"queryKeys": strings.Join(maps.Keys(req.URL.Query()), ", "),
 	})
+
+	flysrc, err := flysrc.FromRequest(req)
+	if err != nil {
+		if t.RequireFlySrc {
+			pud.reqLog.Warn(err.Error())
+			return nil, errorResponse(ErrBadRequest)
+		}
+	} else {
+		pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
+			"flysrc-org":       flysrc.Org,
+			"flysrc-app":       flysrc.App,
+			"flysrc-instance":  flysrc.Instance,
+			"flysrc-timestamp": flysrc.Timestamp,
+		})
+	}
 
 	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
 	if reqProcessors, err := t.processorsFromRequest(req); err != nil {

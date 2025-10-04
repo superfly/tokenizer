@@ -89,6 +89,10 @@ func runServe() {
 		opts = append(opts, tokenizer.OpenProxy())
 	}
 
+	if slices.Contains([]string{"1", "true"}, os.Getenv("REQUIRE_FLY_SRC")) {
+		opts = append(opts, tokenizer.RequireFlySrc())
+	}
+
 	tkz := tokenizer.NewTokenizer(key, opts...)
 
 	if len(os.Getenv("DEBUG")) != 0 {
