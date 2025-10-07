@@ -33,6 +33,10 @@ type Parsed struct {
 }
 
 func FromRequest(req *http.Request) (*Parsed, error) {
+	if p := FlySrcFromContext(req.Context()); p != nil {
+		return p, nil
+	}
+
 	srcHdr := req.Header.Get(headerFlySrc)
 	if srcHdr == "" {
 		return nil, errors.New("missing Fly-Src header")

@@ -28,8 +28,15 @@ const (
 	maxFlySrcAge = 30 * time.Second
 )
 
+var redactedBase64 []byte
+
+func init() {
+	redactedBase64, _ = base64.StdEncoding.DecodeString("REDACTED")
+}
+
 type AuthConfig interface {
 	AuthRequest(req *http.Request) error
+	StripHazmat() AuthConfig
 }
 
 type wireAuth struct {
@@ -110,6 +117,10 @@ func (c *BearerAuthConfig) AuthRequest(req *http.Request) error {
 	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
 }
 
+func (c *BearerAuthConfig) StripHazmat() AuthConfig {
+	return &BearerAuthConfig{redactedBase64}
+}
+
 type MacaroonAuthConfig struct {
 	Key []byte `json:"key"`
 }
@@ -148,6 +159,10 @@ func (c *MacaroonAuthConfig) AuthRequest(req *http.Request) error {
 	}
 
 	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
+}
+
+func (c *MacaroonAuthConfig) StripHazmat() AuthConfig {
+	return &MacaroonAuthConfig{redactedBase64}
 }
 
 func (c *MacaroonAuthConfig) Macaroon(caveats ...macaroon.Caveat) (string, error) {
@@ -202,6 +217,10 @@ func (c *FlyioMacaroonAuthConfig) AuthRequest(req *http.Request) error {
 	}
 
 	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
+}
+
+func (c *FlyioMacaroonAuthConfig) StripHazmat() AuthConfig {
+	return c
 }
 
 // FlySrcAuthConfig allows permitting access to a secret based on the Fly-Src
@@ -280,12 +299,20 @@ func (c *FlySrcAuthConfig) AuthRequest(req *http.Request) error {
 	return nil
 }
 
+func (c *FlySrcAuthConfig) StripHazmat() AuthConfig {
+	return c
+}
+
 type NoAuthConfig struct{}
 
 var _ AuthConfig = (*NoAuthConfig)(nil)
 
 func (c *NoAuthConfig) AuthRequest(req *http.Request) error {
 	return nil
+}
+
+func (c *NoAuthConfig) StripHazmat() AuthConfig {
+	return c
 }
 
 func proxyAuthorizationTokens(req *http.Request) (ret []string) {
