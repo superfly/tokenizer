@@ -260,8 +260,6 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
 	}
 
-	// XXX TODO: will fly src headers appear in each request within the proxy stream?
-	// XXX or do we have to get the fly src once for the connect message and share?
 	fsrc, err := flysrc.FromRequest(req)
 	if err != nil {
 		if t.RequireFlySrc {
