@@ -26,7 +26,7 @@ const (
 
 var VerifyKey = readFlySrcKey(flySrcSignatureKeyPath)
 
-var flyProxyNet = net.IPNet{
+var FlyProxyNet = net.IPNet{
 	IP:   net.ParseIP("172.16.0.0"),
 	Mask: net.CIDRMask(16, 32),
 }
@@ -65,7 +65,7 @@ func FromRequest(req *http.Request) (*Parsed, error) {
 
 	// The fly-src is only trusted if it comes from fly-proxy, which
 	// means it will arrive to the service_ip (127.19.x.x/16) from 172.16.x.x/16.
-	if !flyProxyNet.Contains(peerIp) {
+	if !FlyProxyNet.Contains(peerIp) {
 		return nil, errors.New("fly-src is not from fly-proxy")
 	}
 

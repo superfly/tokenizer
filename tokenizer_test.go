@@ -29,6 +29,9 @@ import (
 )
 
 func TestTokenizer(t *testing.T) {
+	// honor fly-src when from 127.0.0.1/16 instead of from 172.16.0.0/16.
+	flysrc.FlyProxyNet.IP = net.ParseIP("127.0.0.1")
+
 	appServer := httptest.NewTLSServer(echo)
 	defer appServer.Close()
 
