@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -24,6 +25,11 @@ const (
 )
 
 var VerifyKey = readFlySrcKey(flySrcSignatureKeyPath)
+
+var flyProxyNet = net.IPNet{
+	IP:   net.ParseIP("172.16.0.0"),
+	Mask: net.CIDRMask(16, 32),
+}
 
 type Parsed struct {
 	Org       string
@@ -45,6 +51,22 @@ func FromRequest(req *http.Request) (*Parsed, error) {
 	sigHdr := req.Header.Get(headerFlySrcSignature)
 	if sigHdr == "" {
 		return nil, errors.New("missing Fly-Src signature")
+	}
+
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return nil, errors.New("fly-src from malformed remote address")
+	}
+
+	peerIp := net.ParseIP(host)
+	if peerIp == nil {
+		return nil, errors.New("fly-src from malformed ip")
+	}
+
+	// The fly-src is only trusted if it comes from fly-proxy, which
+	// means it will arrive to the service_ip (127.19.x.x/16) from 172.16.x.x/16.
+	if !flyProxyNet.Contains(peerIp) {
+		return nil, errors.New("fly-src is not from fly-proxy")
 	}
 
 	return verifyAndParseFlySrc(srcHdr, sigHdr, VerifyKey)
