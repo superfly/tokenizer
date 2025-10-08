@@ -32,6 +32,7 @@ var (
 
 var (
 	versionFlag = flag.Bool("version", false, "print the version number")
+	sealKeyFlag = flag.Bool("sealkey", false, "print the seal key and exit")
 )
 
 func init() {
@@ -57,6 +58,8 @@ func main() {
 	switch {
 	case *versionFlag:
 		runVersion()
+	case *sealKeyFlag:
+		runSealKey()
 	default:
 		runServe()
 	}
@@ -139,6 +142,17 @@ func handleSignals(server *http.Server) {
 			logrus.WithError(err).Warn("immediate shutdown")
 		}
 	}
+}
+
+func runSealKey() {
+	key := os.Getenv("OPEN_KEY")
+	if key == "" {
+		fmt.Fprintf(os.Stderr, "missing OPEN_KEY\n")
+		os.Exit(1)
+	}
+
+	tkz := tokenizer.NewTokenizer(key)
+	fmt.Fprintf(os.Stderr, "export SEAL_KEY=%v\n", tkz.SealKey())
 }
 
 var Version = ""

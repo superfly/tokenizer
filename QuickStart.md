@@ -41,20 +41,19 @@ The commands I used to create the app and use it are:
 # create the app, it will fail to start
 fly -c fly.toml.timkenizer launch
 
-# generate and set the secret key
+# generate and set the secret "open" and "seal" keys.
+# install the OPEN_KEY on the server and keep the SEAL_KEY for later.
 export OPEN_KEY=$(openssl rand -hex 32)
+export SEAL_KEY=$(go run ./cmd/tokenizer -sealkey)
 fly -c fly.toml.timkenizer secrets set OPEN_KEY=$OPEN_KEY
 
-# find the seal key in the logs
-fly -c fly.toml.timkenizer logs -n |grep -o 'seal_key=.*'
-seal_key=xxxxxx
-export SEAL_KEY=$seal_key
-
-# seal a token, here restricted to use against https://timflyio-go-example.fly.dev from app=thenewsh
+# use the SEAL_KEY to generate a proxy token that will inject a secret token into requests to the target.
+# here restricted to use against https://timflyio-go-example.fly.dev from app=thenewsh
 TOKEN=$(go run ./cmd/sealtoken -host timflyio-go-example.fly.dev -org tim-newsham -app thenewsh MY_SECRET_TOKEN)
 
-# and use it from the approved app to the approved url
-# note: you'll need to opt-in to get a fly-src header to approve the request.
+# install the TOKEN in your approved app and use it to access the approved url.
+# the secret token (MY_SECRET_TOKEN) will be added as a bearer token.
+# note: you'll need to opt-in to get a fly-src header to allow the proxy to approve the request.
 curl -H "Proxy-Tokenizer: $TOKEN" -H "fly-src-optin: *" -x https://timkenizer.fly.dev http://timflyio-go-example.fly.dev
 
 # try out some bad requests to the wrong target, from the wrong app, etc..
