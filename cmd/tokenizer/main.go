@@ -75,7 +75,7 @@ func runServe() {
 
 	key := os.Getenv("OPEN_KEY")
 	if key == "" {
-		fmt.Fprintf(os.Stderr, "missing OPEN_KEY")
+		fmt.Fprintf(os.Stderr, "missing OPEN_KEY\n")
 		os.Exit(1)
 	}
 
