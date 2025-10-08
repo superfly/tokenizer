@@ -28,6 +28,7 @@ const (
 	maxFlySrcAge = 30 * time.Second
 )
 
+var redactedStr = "REDACTED"
 var redactedBase64 []byte
 
 func init() {

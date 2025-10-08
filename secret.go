@@ -52,7 +52,7 @@ func (s *Secret) sealRaw(key *[32]byte) (string, error) {
 func (s *Secret) StripHazmat() *Secret {
 	return &Secret{
 		AuthConfig:        s.AuthConfig.StripHazmat(),
-		ProcessorConfig:   s.ProcessorConfig,
+		ProcessorConfig:   s.ProcessorConfig.StripHazmat(),
 		RequestValidators: s.RequestValidators,
 	}
 }
