@@ -24,7 +24,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/exp/maps"
 
-	"github.com/superfly/tokenizer/flysrc"
+	"github.com/superfly/flysrc-go"
 )
 
 var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
@@ -60,6 +60,12 @@ type tokenizer struct {
 
 	priv *[32]byte
 	pub  *[32]byte
+
+	flysrcParser *flysrc.Parser
+}
+
+func (t *tokenizer) GetFlysrcParser() *flysrc.Parser {
+	return t.flysrcParser
 }
 
 type Option func(*tokenizer)
@@ -75,6 +81,14 @@ func OpenProxy() Option {
 func RequireFlySrc() Option {
 	return func(t *tokenizer) {
 		t.RequireFlySrc = true
+	}
+}
+
+// WithFlysrcParser specifies a preconfigured flysrc parser to use instead of the
+// default flysrc parser.
+func WithFlysrcParser(parser *flysrc.Parser) Option {
+	return func(t *tokenizer) {
+		t.flysrcParser = parser
 	}
 }
 
@@ -102,10 +116,18 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	curve25519.ScalarBaseMult(pub, priv)
 
 	proxy := goproxy.NewProxyHttpServer()
-	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub}
+	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub, flysrcParser: nil}
 
 	for _, opt := range opts {
 		opt(tkz)
+	}
+
+	if tkz.flysrcParser == nil {
+		parser, err := flysrc.New()
+		if err != nil {
+			logrus.WithError(err).Panic("Error making flysrc parser")
+		}
+		tkz.flysrcParser = parser
 	}
 
 	hostnameMap := map[string]bool{}
@@ -260,19 +282,18 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
 	}
 
-	fsrc, err := flysrc.FromRequest(req)
+	src, err := t.flysrcParser.FromRequest(req)
 	if err != nil {
 		if t.RequireFlySrc {
 			pud.reqLog.Warn(err.Error())
 			return nil, errorResponse(ErrBadRequest)
 		}
 	} else {
-		req = req.Clone(flysrc.WithFlySrc(req.Context(), fsrc))
 		pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
-			"flysrc-org":       fsrc.Org,
-			"flysrc-app":       fsrc.App,
-			"flysrc-instance":  fsrc.Instance,
-			"flysrc-timestamp": fsrc.Timestamp,
+			"flysrc-org":       src.Org,
+			"flysrc-app":       src.App,
+			"flysrc-instance":  src.Instance,
+			"flysrc-timestamp": src.Timestamp,
 		})
 	}
 
@@ -377,7 +398,7 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor
 		}
 
 		safeSecret = secret.StripHazmatString()
-		if err = secret.AuthRequest(req); err != nil {
+		if err = secret.AuthRequest(t, req); err != nil {
 			return nil, safeSecret, fmt.Errorf("unauthorized to use secret: %w", err)
 		}
 
