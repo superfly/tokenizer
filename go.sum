@@ -31,6 +31,8 @@ github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcU
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/superfly/flysrc-go v0.0.2 h1:/XKz8h7rkk6nuX76cb6YedA3dG3V4yP0N6opUrkrcLU=
 github.com/superfly/flysrc-go v0.0.2/go.mod h1:xChBoolsYRcpANrrdDMQc7u8mERwWmQLu+vu7Cmdg/A=
+github.com/superfly/flysrc-go v0.0.3 h1:ykFxTVWX9sp6s+9ukg5ZQWbco0wT3TOiWwODhR3Q4UI=
+github.com/superfly/flysrc-go v0.0.3/go.mod h1:xChBoolsYRcpANrrdDMQc7u8mERwWmQLu+vu7Cmdg/A=
 github.com/superfly/macaroon v0.2.14-0.20240819201738-61a02aa53648 h1:YQG1v1QcTFQxJureNBcbtxosZ98u78ceUNCDQgI/vgM=
 github.com/superfly/macaroon v0.2.14-0.20240819201738-61a02aa53648/go.mod h1:Kt6/EdSYfFjR4GIe+erMwcJgU8iMu1noYVceQ5dNdKo=
 github.com/vmihailenco/msgpack/v5 v5.3.5 h1:5gO0H1iULLWGhs2H5tbAHIZTV8/cYafcFOr9znI5mJU=
