@@ -49,6 +49,19 @@ func (s *Secret) sealRaw(key *[32]byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(sct), nil
 }
 
+func (s *Secret) StripHazmat() *Secret {
+	return &Secret{
+		AuthConfig:        s.AuthConfig.StripHazmat(),
+		ProcessorConfig:   s.ProcessorConfig.StripHazmat(),
+		RequestValidators: s.RequestValidators,
+	}
+}
+
+func (s *Secret) StripHazmatString() string {
+	bs, _ := json.Marshal(s.StripHazmat())
+	return string(bs)
+}
+
 type wireSecret struct {
 	wireProcessor
 	wireAuth

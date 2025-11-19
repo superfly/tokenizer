@@ -23,6 +23,8 @@ import (
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/exp/maps"
+
+	"github.com/superfly/flysrc-go"
 )
 
 var FilteredHeaders = []string{headerProxyAuthorization, headerProxyTokenizer}
@@ -46,6 +48,9 @@ type tokenizer struct {
 	// OpenProxy dictates whether requests without any sealed secrets are allowed.
 	OpenProxy bool
 
+	// RequireFlySrc will reject requests without a fly-src when set.
+	RequireFlySrc bool
+
 	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
 	// If provided, this allows tokenizer to transparently proxy requests (ie.
 	// accept normal HTTP requests with arbitrary hostnames) while blocking
@@ -55,6 +60,12 @@ type tokenizer struct {
 
 	priv *[32]byte
 	pub  *[32]byte
+
+	flysrcParser *flysrc.Parser
+}
+
+func (t *tokenizer) GetFlysrcParser() *flysrc.Parser {
+	return t.flysrcParser
 }
 
 type Option func(*tokenizer)
@@ -63,6 +74,21 @@ type Option func(*tokenizer)
 func OpenProxy() Option {
 	return func(t *tokenizer) {
 		t.OpenProxy = true
+	}
+}
+
+// RequireFlySrc specifies that requests without a fly-src will be rejected.
+func RequireFlySrc() Option {
+	return func(t *tokenizer) {
+		t.RequireFlySrc = true
+	}
+}
+
+// WithFlysrcParser specifies a preconfigured flysrc parser to use instead of the
+// default flysrc parser.
+func WithFlysrcParser(parser *flysrc.Parser) Option {
+	return func(t *tokenizer) {
+		t.flysrcParser = parser
 	}
 }
 
@@ -90,10 +116,18 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	curve25519.ScalarBaseMult(pub, priv)
 
 	proxy := goproxy.NewProxyHttpServer()
-	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub}
+	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub, flysrcParser: nil}
 
 	for _, opt := range opts {
 		opt(tkz)
+	}
+
+	if tkz.flysrcParser == nil {
+		parser, err := flysrc.New()
+		if err != nil {
+			logrus.WithError(err).Panic("Error making flysrc parser")
+		}
+		tkz.flysrcParser = parser
 	}
 
 	hostnameMap := map[string]bool{}
@@ -106,9 +140,11 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case len(hostnameMap) == 0:
+			logrus.WithFields(reqLogFields(r)).Warn("I'm not that kind of server")
 			http.Error(w, "I'm not that kind of server", 400)
 			return
 		case r.Host == "":
+			logrus.WithFields(reqLogFields(r)).Warn("must specify host")
 			http.Error(w, "must specify host", 400)
 			return
 		}
@@ -118,12 +154,14 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 			if strings.Contains(err.Error(), "missing port in address") {
 				host = r.Host
 			} else {
+				logrus.WithFields(reqLogFields(r)).Warn("bad host")
 				http.Error(w, "bad host", 400)
 				return
 			}
 		}
 
 		if hostnameMap[host] {
+			logrus.WithFields(reqLogFields(r)).Warn("circular request")
 			http.Error(w, "circular request", 400)
 			return
 		}
@@ -169,14 +207,16 @@ type proxyUserData struct {
 
 // HandleConnect implements goproxy.FuncHttpsHandler
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+	logger := logrus.WithField("connect_host", host)
+	logger = logger.WithFields(reqLogFields(ctx.Req))
 	if host == "" {
-		logrus.Warn("no host in CONNECT request")
+		logger.Warn("no host in CONNECT request")
 		ctx.Resp = errorResponse(ErrBadRequest)
 		return goproxy.RejectConnect, ""
 	}
 
 	pud := &proxyUserData{
-		connLog:      logrus.WithField("connect_host", host),
+		connLog:      logger,
 		connectStart: time.Now(),
 	}
 
@@ -187,16 +227,40 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 		return goproxy.RejectConnect, ""
 	}
 
-	var err error
-	if pud.connectProcessors, err = t.processorsFromRequest(ctx.Req); err != nil {
+	connectProcessors, safeSecret, err := t.processorsFromRequest(ctx.Req)
+	if safeSecret != "" {
+		pud.connLog = pud.connLog.WithField("secret", safeSecret)
+	}
+	if err != nil {
 		pud.connLog.WithError(err).Warn("find processor (CONNECT)")
 		ctx.Resp = errorResponse(err)
 		return goproxy.RejectConnect, ""
 	}
 
+	pud.connectProcessors = connectProcessors
 	ctx.UserData = pud
 
 	return goproxy.HTTPMitmConnect, host
+}
+
+func getSource(req *http.Request) string {
+	var forwards []string
+	if forwardedFor := req.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		forwards = strings.Split(forwardedFor, ", ")
+	}
+
+	srcs := append(forwards, req.RemoteAddr)
+	return strings.Join(srcs, ", ")
+}
+
+func reqLogFields(req *http.Request) logrus.Fields {
+	return logrus.Fields{
+		"source":    getSource(req),
+		"method":    req.Method,
+		"host":      req.Host,
+		"path":      req.URL.Path,
+		"queryKeys": strings.Join(maps.Keys(req.URL.Query()), ", "),
+	}
 }
 
 // HandleRequest implements goproxy.FuncReqHandler
@@ -215,17 +279,30 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 	if pud.connLog != nil {
 		pud.reqLog = pud.connLog
 	} else {
-		pud.reqLog = logrus.StandardLogger()
+		pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
 	}
-	pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
-		"method":    req.Method,
-		"host":      req.Host,
-		"path":      req.URL.Path,
-		"queryKeys": strings.Join(maps.Keys(req.URL.Query()), ", "),
-	})
+
+	src, err := t.flysrcParser.FromRequest(req)
+	if err != nil {
+		if t.RequireFlySrc {
+			pud.reqLog.Warn(err.Error())
+			return nil, errorResponse(ErrBadRequest)
+		}
+	} else {
+		pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
+			"flysrc-org":       src.Org,
+			"flysrc-app":       src.App,
+			"flysrc-instance":  src.Instance,
+			"flysrc-timestamp": src.Timestamp,
+		})
+	}
 
 	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
-	if reqProcessors, err := t.processorsFromRequest(req); err != nil {
+	reqProcessors, safeSecret, err := t.processorsFromRequest(req)
+	if safeSecret != "" {
+		pud.reqLog = pud.reqLog.WithField("secret", safeSecret)
+	}
+	if err != nil {
 		pud.reqLog.WithError(err).Warn("find processor")
 		return req, errorResponse(err)
 	} else {
@@ -294,49 +371,51 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 	return resp
 }
 
-func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, error) {
+func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, string, error) {
 	hdrs := req.Header[headerProxyTokenizer]
 	processors := make([]RequestProcessor, 0, len(hdrs))
 
+	var safeSecret string
 	for _, hdr := range hdrs {
 		b64Secret, params, err := parseHeaderProxyTokenizer(hdr)
 		if err != nil {
-			return nil, err
+			return nil, safeSecret, err
 		}
 
 		ctSecret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Secret))
 		if err != nil {
-			return nil, fmt.Errorf("bad Proxy-Tokenizer encoding: %w", err)
+			return nil, safeSecret, fmt.Errorf("bad Proxy-Tokenizer encoding: %w", err)
 		}
 
 		jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, t.pub, t.priv)
 		if !ok {
-			return nil, errors.New("failed Proxy-Tokenizer decryption")
+			return nil, safeSecret, errors.New("failed Proxy-Tokenizer decryption")
 		}
 
 		secret := new(Secret)
 		if err = json.Unmarshal(jsonSecret, secret); err != nil {
-			return nil, fmt.Errorf("bad secret json: %w", err)
+			return nil, safeSecret, fmt.Errorf("bad secret json: %w", err)
 		}
 
-		if err = secret.AuthRequest(req); err != nil {
-			return nil, fmt.Errorf("unauthorized to use secret: %w", err)
+		safeSecret = secret.StripHazmatString()
+		if err = secret.AuthRequest(t, req); err != nil {
+			return nil, safeSecret, fmt.Errorf("unauthorized to use secret: %w", err)
 		}
 
 		for _, v := range secret.RequestValidators {
 			if err := v.Validate(req); err != nil {
-				return nil, fmt.Errorf("request validator failed: %w", err)
+				return nil, safeSecret, fmt.Errorf("request validator failed: %w", err)
 			}
 		}
 
 		processor, err := secret.Processor(params)
 		if err != nil {
-			return nil, err
+			return nil, safeSecret, err
 		}
 		processors = append(processors, processor)
 	}
 
-	return processors, nil
+	return processors, safeSecret, nil
 }
 
 func parseHeaderProxyTokenizer(hdr string) (string, map[string]string, error) {

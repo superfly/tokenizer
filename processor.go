@@ -48,6 +48,7 @@ type RequestProcessor func(r *http.Request) error
 
 type ProcessorConfig interface {
 	Processor(map[string]string) (RequestProcessor, error)
+	StripHazmat() ProcessorConfig
 }
 
 type wireProcessor struct {
@@ -129,6 +130,15 @@ func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProc
 	}, nil
 }
 
+func (c *InjectProcessorConfig) StripHazmat() ProcessorConfig {
+	// DO NOT PUT HAZMAT INTO FmtProcessor or DstProcessor.
+	return &InjectProcessorConfig{
+		Token:        redactedStr,
+		FmtProcessor: c.FmtProcessor,
+		DstProcessor: c.DstProcessor,
+	}
+}
+
 type InjectHMACProcessorConfig struct {
 	Key  []byte `json:"key"`
 	Hash string `json:"hash"`
@@ -178,6 +188,16 @@ func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (Request
 	}, nil
 }
 
+func (c *InjectHMACProcessorConfig) StripHazmat() ProcessorConfig {
+	// DO NOT PUT HAZMAT INTO FmtProcessor or DstProcessor.
+	return &InjectHMACProcessorConfig{
+		Key:          redactedBase64,
+		Hash:         redactedStr,
+		FmtProcessor: c.FmtProcessor,
+		DstProcessor: c.DstProcessor,
+	}
+}
+
 type OAuthProcessorConfig struct {
 	Token *OAuthToken `json:"token"`
 }
@@ -203,6 +223,15 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 		r.Header.Set("Authorization", "Bearer "+token)
 		return nil
 	}, nil
+}
+
+func (c *OAuthProcessorConfig) StripHazmat() ProcessorConfig {
+	return &OAuthProcessorConfig{
+		Token: &OAuthToken{
+			AccessToken:  redactedStr,
+			RefreshToken: redactedStr,
+		},
+	}
 }
 
 type Sigv4ProcessorConfig struct {
@@ -299,6 +328,13 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 	}, nil
 }
 
+func (c *Sigv4ProcessorConfig) StripHazmat() ProcessorConfig {
+	return &Sigv4ProcessorConfig{
+		AccessKey: redactedStr,
+		SecretKey: redactedStr,
+	}
+}
+
 type MultiProcessorConfig []ProcessorConfig
 
 var _ ProcessorConfig = new(MultiProcessorConfig)
@@ -321,6 +357,14 @@ func (c MultiProcessorConfig) Processor(params map[string]string) (RequestProces
 		}
 		return nil
 	}, nil
+}
+
+func (c *MultiProcessorConfig) StripHazmat() ProcessorConfig {
+	ret := make(MultiProcessorConfig, len(*c))
+	for n, p := range *c {
+		ret[n] = p.StripHazmat()
+	}
+	return &ret
 }
 
 func (c MultiProcessorConfig) MarshalJSON() ([]byte, error) {

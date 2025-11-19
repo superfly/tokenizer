@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/superfly/flysrc-go"
 	"github.com/superfly/macaroon"
 	"github.com/superfly/macaroon/bundle"
 	"github.com/superfly/macaroon/flyio"
 	"github.com/superfly/macaroon/flyio/machinesapi"
-	"github.com/superfly/tokenizer/flysrc"
 	tkmac "github.com/superfly/tokenizer/macaroon"
 	"golang.org/x/exp/slices"
 )
@@ -28,8 +28,20 @@ const (
 	maxFlySrcAge = 30 * time.Second
 )
 
+var redactedStr = "REDACTED"
+var redactedBase64 []byte
+
+func init() {
+	redactedBase64, _ = base64.StdEncoding.DecodeString("REDACTED")
+}
+
+type AuthContext interface {
+	GetFlysrcParser() *flysrc.Parser
+}
+
 type AuthConfig interface {
-	AuthRequest(req *http.Request) error
+	AuthRequest(authctx AuthContext, req *http.Request) error
+	StripHazmat() AuthConfig
 }
 
 type wireAuth struct {
@@ -99,7 +111,7 @@ func NewBearerAuthConfig(token string) *BearerAuthConfig {
 
 var _ AuthConfig = (*BearerAuthConfig)(nil)
 
-func (c *BearerAuthConfig) AuthRequest(req *http.Request) error {
+func (c *BearerAuthConfig) AuthRequest(authctx AuthContext, req *http.Request) error {
 	for _, tok := range proxyAuthorizationTokens(req) {
 		hdrDigest := sha256.Sum256([]byte(tok))
 		if subtle.ConstantTimeCompare(c.Digest, hdrDigest[:]) == 1 {
@@ -108,6 +120,10 @@ func (c *BearerAuthConfig) AuthRequest(req *http.Request) error {
 	}
 
 	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
+}
+
+func (c *BearerAuthConfig) StripHazmat() AuthConfig {
+	return &BearerAuthConfig{redactedBase64}
 }
 
 type MacaroonAuthConfig struct {
@@ -120,7 +136,7 @@ func NewMacaroonAuthConfig(key []byte) *MacaroonAuthConfig {
 
 var _ AuthConfig = (*MacaroonAuthConfig)(nil)
 
-func (c *MacaroonAuthConfig) AuthRequest(req *http.Request) error {
+func (c *MacaroonAuthConfig) AuthRequest(authctx AuthContext, req *http.Request) error {
 	var (
 		expectedKID = tkmac.KeyFingerprint(c.Key)
 		log         = logrus.WithField("expected-kid", hex.EncodeToString(expectedKID))
@@ -148,6 +164,10 @@ func (c *MacaroonAuthConfig) AuthRequest(req *http.Request) error {
 	}
 
 	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
+}
+
+func (c *MacaroonAuthConfig) StripHazmat() AuthConfig {
+	return &MacaroonAuthConfig{redactedBase64}
 }
 
 func (c *MacaroonAuthConfig) Macaroon(caveats ...macaroon.Caveat) (string, error) {
@@ -178,7 +198,7 @@ func NewFlyioMacaroonAuthConfig(access *flyio.Access) *FlyioMacaroonAuthConfig {
 
 var _ AuthConfig = (*FlyioMacaroonAuthConfig)(nil)
 
-func (c *FlyioMacaroonAuthConfig) AuthRequest(req *http.Request) error {
+func (c *FlyioMacaroonAuthConfig) AuthRequest(authctx AuthContext, req *http.Request) error {
 	var ctx = req.Context()
 
 	for _, tok := range proxyAuthorizationTokens(req) {
@@ -202,6 +222,10 @@ func (c *FlyioMacaroonAuthConfig) AuthRequest(req *http.Request) error {
 	}
 
 	return fmt.Errorf("%w: bad or missing proxy auth", ErrNotAuthorized)
+}
+
+func (c *FlyioMacaroonAuthConfig) StripHazmat() AuthConfig {
+	return c
 }
 
 // FlySrcAuthConfig allows permitting access to a secret based on the Fly-Src
@@ -259,8 +283,9 @@ func NewFlySrcAuthConfig(opts ...FlySrcOpt) *FlySrcAuthConfig {
 
 var _ AuthConfig = (*FlySrcAuthConfig)(nil)
 
-func (c *FlySrcAuthConfig) AuthRequest(req *http.Request) error {
-	fs, err := flysrc.FromRequest(req)
+func (c *FlySrcAuthConfig) AuthRequest(authctx AuthContext, req *http.Request) error {
+	flysrcParser := authctx.GetFlysrcParser()
+	fs, err := flysrcParser.FromRequest(req)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotAuthorized, err)
 	}
@@ -280,12 +305,20 @@ func (c *FlySrcAuthConfig) AuthRequest(req *http.Request) error {
 	return nil
 }
 
+func (c *FlySrcAuthConfig) StripHazmat() AuthConfig {
+	return c
+}
+
 type NoAuthConfig struct{}
 
 var _ AuthConfig = (*NoAuthConfig)(nil)
 
-func (c *NoAuthConfig) AuthRequest(req *http.Request) error {
+func (c *NoAuthConfig) AuthRequest(authctx AuthContext, req *http.Request) error {
 	return nil
+}
+
+func (c *NoAuthConfig) StripHazmat() AuthConfig {
+	return c
 }
 
 func proxyAuthorizationTokens(req *http.Request) (ret []string) {
