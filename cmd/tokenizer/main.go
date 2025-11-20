@@ -193,8 +193,7 @@ func versionString() string {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `
-tokenizer is an HTTP proxy that injects third party authentication credentials into requests
+	fmt.Fprintf(os.Stderr, `tokenizer is an HTTP proxy that injects third party authentication credentials into requests
 
 Usage:
 
@@ -212,7 +211,7 @@ Configuration — tokenizer is configured using the following environment variab
     LISTEN_ADDRESS   - The host:port address to listen at. Default: ":8080"
     FILTERED_HEADERS - Comma separated list of headers to filter from client
                        requests.
-`[1:])
+`)
 }
 
 type debugListener struct {
