@@ -46,6 +46,10 @@ type tokenizer struct {
 	// OpenProxy dictates whether requests without any sealed secrets are allowed.
 	OpenProxy bool
 
+	// MitmEnabled enables HTTPS MITM proxying with CA certificate.
+	// When enabled, the proxy can intercept HTTPS connections to inject credentials.
+	MitmEnabled bool
+
 	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
 	// If provided, this allows tokenizer to transparently proxy requests (ie.
 	// accept normal HTTP requests with arbitrary hostnames) while blocking
@@ -63,6 +67,20 @@ type Option func(*tokenizer)
 func OpenProxy() Option {
 	return func(t *tokenizer) {
 		t.OpenProxy = true
+	}
+}
+
+// MitmCACert configures the CA certificate for HTTPS MITM proxying.
+// When configured, the proxy can intercept HTTPS CONNECT requests and
+// inject credentials into them. Clients must trust this CA certificate.
+func MitmCACert(cert tls.Certificate) Option {
+	return func(t *tokenizer) {
+		t.MitmEnabled = true
+		goproxy.GoproxyCa = cert
+		goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
+		goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
+		goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
+		goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
 	}
 }
 
@@ -181,7 +199,7 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 	}
 
 	_, port, _ := strings.Cut(host, ":")
-	if port == "443" {
+	if port == "443" && !t.MitmEnabled {
 		pud.connLog.Warn("attempt to proxy to https downstream")
 		ctx.Resp = errorResponse(ErrBadRequest)
 		return goproxy.RejectConnect, ""
@@ -196,6 +214,11 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 
 	ctx.UserData = pud
 
+	// For HTTPS (port 443) with MITM enabled, use MitmConnect to do TLS interception
+	// For HTTP tunnels, use HTTPMitmConnect to read plaintext HTTP
+	if port == "443" && t.MitmEnabled {
+		return goproxy.MitmConnect, host
+	}
 	return goproxy.HTTPMitmConnect, host
 }
 
@@ -451,7 +474,12 @@ func (t *tokenizer) dialFunc() func(string, string) (net.Conn, error) {
 		}
 		switch port {
 		case "443":
-			return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
+			if !t.MitmEnabled {
+				return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
+			}
+			addr = fmt.Sprintf("%s:%s", hostname, port)
+
+			return netDialer.Dial(network, addr)
 		case "80", "":
 			port = "443"
 		}

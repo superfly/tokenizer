@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -87,6 +89,25 @@ func runServe() {
 
 	if slices.Contains([]string{"1", "true"}, os.Getenv("OPEN_PROXY")) {
 		opts = append(opts, tokenizer.OpenProxy())
+	}
+
+	// MITM CA certificate for HTTPS interception
+	mitmCertPath := os.Getenv("MITM_CA_CERT_PATH")
+	mitmKeyPath := os.Getenv("MITM_CA_KEY_PATH")
+	if mitmCertPath != "" && mitmKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(mitmCertPath, mitmKeyPath)
+		if err != nil {
+			logrus.WithError(err).Fatal("failed to load MITM CA certificate")
+		}
+		// Parse the x509 certificate - goproxy needs this for TLSConfigFromCA
+		if cert.Leaf == nil && len(cert.Certificate) > 0 {
+			cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				logrus.WithError(err).Fatal("failed to parse MITM CA certificate")
+			}
+		}
+		opts = append(opts, tokenizer.MitmCACert(cert))
+		logrus.Info("HTTPS MITM enabled - clients must trust the CA certificate")
 	}
 
 	tkz := tokenizer.NewTokenizer(key, opts...)
@@ -188,12 +209,17 @@ Flags:
 
 Configuration — tokenizer is configured using the following environment variables:
 
-    OPEN_KEY         - Hex encoded curve25519 private key. You can provide 32
-                       random, hex encoded bytes. The log output will contain
-                       the associated public key.
-    LISTEN_ADDRESS   - The host:port address to listen at. Default: ":8080"
-    FILTERED_HEADERS - Comma separated list of headers to filter from client
-                       requests.
+    OPEN_KEY           - Hex encoded curve25519 private key. You can provide 32
+                         random, hex encoded bytes. The log output will contain
+                         the associated public key.
+    LISTEN_ADDRESS     - The host:port address to listen at. Default: ":8080"
+    FILTERED_HEADERS   - Comma separated list of headers to filter from client
+                         requests.
+    MITM_CA_CERT_PATH  - Path to CA certificate for HTTPS MITM proxying.
+                         When set along with MITM_CA_KEY_PATH, enables interception
+                         of HTTPS CONNECT requests to inject credentials.
+                         Clients must trust this CA certificate.
+    MITM_CA_KEY_PATH   - Path to CA private key for HTTPS MITM proxying.
 `[1:])
 }
 
