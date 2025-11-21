@@ -134,7 +134,7 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	})
 
 	proxy.Tr = &http.Transport{
-		Dial: dialFunc(tkz.tokenizerHostnames),
+		Dial: tkz.dialFunc(),
 		// probably not necessary, but I don't want to worry about desync/smuggling
 		DisableKeepAlives: true,
 	}
@@ -398,7 +398,8 @@ func errorResponse(err error) *http.Response {
 //     our proxy can't do passthrough TLS.
 //   - It forces the upstream connection to be TLS. We want the actual upstream
 //     connection to be over TLS because security.
-func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
+func (t *tokenizer) dialFunc() func(string, string) (net.Conn, error) {
+	badAddrs := t.tokenizerHostnames
 	_, fdaaNet, err := net.ParseCIDR("fdaa::/8")
 	if err != nil {
 		panic(err)
