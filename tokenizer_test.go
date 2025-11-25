@@ -55,7 +55,11 @@ func TestTokenizer(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	tkz := NewTokenizer(openKey, WithFlysrcParser(flysrcParser))
+	// we can build a server without a fly src parser
+	tkz := NewTokenizer(openKey)
+	assert.True(t, tkz != nil)
+
+	tkz = NewTokenizer(openKey, WithFlysrcParser(flysrcParser))
 	tkz.ProxyHttpServer.Verbose = true
 
 	tkzServer := httptest.NewServer(tkz)
@@ -416,6 +420,14 @@ func TestTokenizer(t *testing.T) {
 			},
 			Body: "",
 		}, doEcho(t, client, req))
+
+		// Bad, the same request fails, without panic, if flysrc parser is nil
+		parser := tkz.flysrcParser
+		tkz.flysrcParser = nil
+		resp, err = client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+		tkz.flysrcParser = parser
 
 		// Bad org
 		fs = &flysrc.FlySrc{Org: "WRONG!", App: "bar", Instance: "baz", Timestamp: time.Now().Truncate(time.Second)}

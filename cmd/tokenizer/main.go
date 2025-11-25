@@ -17,6 +17,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/superfly/tokenizer"
 	"golang.org/x/exp/slices"
+
+	"github.com/superfly/flysrc-go"
 )
 
 // Package variables can be overridden at build time:
@@ -94,6 +96,17 @@ func runServe() {
 
 	if slices.Contains([]string{"1", "true"}, os.Getenv("REQUIRE_FLY_SRC")) {
 		opts = append(opts, tokenizer.RequireFlySrc())
+	}
+
+	if slices.Contains([]string{"1", "true"}, os.Getenv("NO_FLY_SRC")) {
+		// nothing
+	} else {
+		parser, err := flysrc.New()
+		if err != nil {
+			logrus.WithError(err).Panic("Error making flysrc parser")
+		}
+
+		opts = append(opts, tokenizer.WithFlysrcParser(parser))
 	}
 
 	tkz := tokenizer.NewTokenizer(key, opts...)

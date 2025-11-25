@@ -285,6 +285,10 @@ var _ AuthConfig = (*FlySrcAuthConfig)(nil)
 
 func (c *FlySrcAuthConfig) AuthRequest(authctx AuthContext, req *http.Request) error {
 	flysrcParser := authctx.GetFlysrcParser()
+	if flysrcParser == nil {
+		return fmt.Errorf("%w: no flysrc parser", ErrNotAuthorized)
+	}
+
 	fs, err := flysrcParser.FromRequest(req)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotAuthorized, err)
