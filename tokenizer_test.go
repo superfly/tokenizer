@@ -482,6 +482,28 @@ func TestTokenizer(t *testing.T) {
 			Body: "",
 		}, doEcho(t, client, req))
 	})
+
+	t.Run("without flysrc parser", func(t *testing.T) {
+		// Create tokenizer without flysrc parser to test graceful degradation
+		// when flysrc.New() fails and RequireFlySrc is false (default)
+		tkzNoFlySrc := NewTokenizer(openKey)
+		tkzNoFlySrc.ProxyHttpServer.Verbose = true
+		tkzNoFlySrcServer := httptest.NewServer(tkzNoFlySrc)
+		defer tkzNoFlySrcServer.Close()
+
+		auth := "no-flysrc-auth"
+		token := "no-flysrc-token"
+		secret, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth), ProcessorConfig: &InjectProcessorConfig{Token: token}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// should work without flysrc parser when RequireFlySrc is false
+		client, err := Client(tkzNoFlySrcServer.URL, WithAuth(auth), WithSecret(secret, nil))
+		assert.NoError(t, err)
+		assert.Equal(t, &echoResponse{
+			Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", token)}},
+			Body:    "",
+		}, doEcho(t, client, req))
+	})
 }
 
 func withHeaders(h http.Header) ClientOption {
