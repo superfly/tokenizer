@@ -37,6 +37,10 @@ const (
 	// ParamSubtoken optionally specifies which subtoken should be used.
 	// Default is SubtokenAccessToken.
 	ParamSubtoken = "st"
+
+	// ParamDelimiter specifies the delimiter to replace in the request body
+	// with the token value. Used by InjectBodyProcessor.
+	ParamDelimiter = "delimiter"
 )
 
 const (
@@ -54,7 +58,9 @@ type ProcessorConfig interface {
 type wireProcessor struct {
 	InjectProcessorConfig     *InjectProcessorConfig     `json:"inject_processor,omitempty"`
 	InjectHMACProcessorConfig *InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
+	InjectBodyProcessorConfig *InjectBodyProcessorConfig `json:"inject_body_processor,omitempty"`
 	OAuthProcessorConfig      *OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
+	OAuthBodyProcessorConfig  *OAuthBodyProcessorConfig  `json:"oauth2_body_processor,omitempty"`
 	Sigv4ProcessorConfig      *Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
 	MultiProcessorConfig      *MultiProcessorConfig      `json:"multi_processor,omitempty"`
 }
@@ -65,8 +71,12 @@ func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
 		return wireProcessor{InjectProcessorConfig: p}, nil
 	case *InjectHMACProcessorConfig:
 		return wireProcessor{InjectHMACProcessorConfig: p}, nil
+	case *InjectBodyProcessorConfig:
+		return wireProcessor{InjectBodyProcessorConfig: p}, nil
 	case *OAuthProcessorConfig:
 		return wireProcessor{OAuthProcessorConfig: p}, nil
+	case *OAuthBodyProcessorConfig:
+		return wireProcessor{OAuthBodyProcessorConfig: p}, nil
 	case *Sigv4ProcessorConfig:
 		return wireProcessor{Sigv4ProcessorConfig: p}, nil
 	case *MultiProcessorConfig:
@@ -88,9 +98,17 @@ func (wp *wireProcessor) getProcessorConfig() (ProcessorConfig, error) {
 		np += 1
 		p = wp.InjectHMACProcessorConfig
 	}
+	if wp.InjectBodyProcessorConfig != nil {
+		np += 1
+		p = wp.InjectBodyProcessorConfig
+	}
 	if wp.OAuthProcessorConfig != nil {
 		np += 1
 		p = wp.OAuthProcessorConfig
+	}
+	if wp.OAuthBodyProcessorConfig != nil {
+		np += 1
+		p = wp.OAuthBodyProcessorConfig
 	}
 	if wp.Sigv4ProcessorConfig != nil {
 		np += 1
@@ -198,6 +216,58 @@ func (c *InjectHMACProcessorConfig) StripHazmat() ProcessorConfig {
 	}
 }
 
+type InjectBodyProcessorConfig struct {
+	Token     string `json:"token"`
+	Delimiter string `json:"delimiter,omitempty"`
+}
+
+var _ ProcessorConfig = new(InjectBodyProcessorConfig)
+
+func (c *InjectBodyProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	if c.Token == "" {
+		return nil, errors.New("missing token")
+	}
+
+	// Get delimiter from params or use config default or fallback
+	delimiter := c.Delimiter
+	if paramDelim, ok := params[ParamDelimiter]; ok {
+		delimiter = paramDelim
+	}
+	if delimiter == "" {
+		delimiter = "{{ACCESS_TOKEN}}"
+	}
+
+	return func(r *http.Request) error {
+		// Read the entire request body
+		if r.Body == nil {
+			return nil
+		}
+
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read request body: %w", err)
+		}
+		r.Body.Close()
+
+		// Replace delimiter with token
+		bodyStr := string(bodyBytes)
+		newBody := strings.ReplaceAll(bodyStr, delimiter, c.Token)
+
+		// Set the new body
+		r.Body = io.NopCloser(strings.NewReader(newBody))
+		r.ContentLength = int64(len(newBody))
+
+		return nil
+	}, nil
+}
+
+func (c *InjectBodyProcessorConfig) StripHazmat() ProcessorConfig {
+	return &InjectBodyProcessorConfig{
+		Token:     redactedStr,
+		Delimiter: c.Delimiter,
+	}
+}
+
 type OAuthProcessorConfig struct {
 	Token *OAuthToken `json:"token"`
 }
@@ -219,6 +289,33 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 		return nil, errors.New("missing token")
 	}
 
+	// Check if delimiter parameter is present for body injection
+	if delimiter, ok := params[ParamDelimiter]; ok && delimiter != "" {
+		// Inject token into request body by replacing delimiter
+		return func(r *http.Request) error {
+			if r.Body == nil {
+				return nil
+			}
+
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read request body: %w", err)
+			}
+			r.Body.Close()
+
+			// Replace delimiter with token
+			bodyStr := string(bodyBytes)
+			newBody := strings.ReplaceAll(bodyStr, delimiter, token)
+
+			// Set the new body
+			r.Body = io.NopCloser(strings.NewReader(newBody))
+			r.ContentLength = int64(len(newBody))
+
+			return nil
+		}, nil
+	}
+
+	// Default behavior: inject into Authorization header
 	return func(r *http.Request) error {
 		r.Header.Set("Authorization", "Bearer "+token)
 		return nil
@@ -231,6 +328,66 @@ func (c *OAuthProcessorConfig) StripHazmat() ProcessorConfig {
 			AccessToken:  redactedStr,
 			RefreshToken: redactedStr,
 		},
+	}
+}
+
+type OAuthBodyProcessorConfig struct {
+	Token     *OAuthToken `json:"token"`
+	Delimiter string      `json:"delimiter,omitempty"`
+}
+
+var _ ProcessorConfig = (*OAuthBodyProcessorConfig)(nil)
+
+func (c *OAuthBodyProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+	token := c.Token.AccessToken
+	if params[ParamSubtoken] == SubtokenRefresh {
+		token = c.Token.RefreshToken
+	}
+
+	if token == "" {
+		return nil, errors.New("missing token")
+	}
+
+	// Get delimiter from params or use config default or fallback
+	delimiter := c.Delimiter
+	if paramDelim, ok := params[ParamDelimiter]; ok {
+		delimiter = paramDelim
+	}
+	if delimiter == "" {
+		delimiter = "{{ACCESS_TOKEN}}"
+	}
+
+	return func(r *http.Request) error {
+		// Read the entire request body
+		if r.Body == nil {
+			return nil
+		}
+
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read request body: %w", err)
+		}
+		r.Body.Close()
+
+		// Replace delimiter with token
+		bodyStr := string(bodyBytes)
+		newBody := strings.ReplaceAll(bodyStr, delimiter, token)
+
+		// Set the new body
+		r.Body = io.NopCloser(strings.NewReader(newBody))
+		r.ContentLength = int64(len(newBody))
+
+		return nil
+	}, nil
+}
+
+func (c *OAuthBodyProcessorConfig) StripHazmat() ProcessorConfig {
+	return &OAuthBodyProcessorConfig{
+		Token: &OAuthToken{
+			AccessToken:  redactedStr,
+			RefreshToken: redactedStr,
+		},
+		Delimiter: c.Delimiter,
 	}
 }
 
