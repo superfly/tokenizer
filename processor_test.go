@@ -2,6 +2,7 @@ package tokenizer
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -102,4 +103,274 @@ func TestDstProcessor(t *testing.T) {
 	assertResult("error", DstProcessor{Dst: "Foo", AllowedDst: []string{"Bar"}}, map[string]string{})
 	assertResult("error", DstProcessor{AllowedDst: []string{"Bar"}}, map[string]string{ParamDst: "Foo"})
 	assertResult("error", DstProcessor{Dst: "Bar"}, map[string]string{ParamDst: "Foo"})
+}
+
+func TestInjectBodyProcessorConfig(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       InjectBodyProcessorConfig
+		params       map[string]string
+		requestBody  string
+		expectedBody string
+	}{
+		{
+			name:         "simple replacement with default placeholder",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123"},
+			params:       map[string]string{},
+			requestBody:  `{"token": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"token": "secret-token-123"}`,
+		},
+		{
+			name:         "multiple occurrences",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123"},
+			params:       map[string]string{},
+			requestBody:  `{"access": "{{ACCESS_TOKEN}}", "refresh": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"access": "secret-token-123", "refresh": "secret-token-123"}`,
+		},
+		{
+			name:         "custom placeholder from params",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123"},
+			params:       map[string]string{ParamPlaceholder: "<<TOKEN>>"},
+			requestBody:  `{"token": "<<TOKEN>>"}`,
+			expectedBody: `{"token": "secret-token-123"}`,
+		},
+		{
+			name:         "custom placeholder from config",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123", Placeholder: "[[TOKEN]]"},
+			params:       map[string]string{},
+			requestBody:  `{"token": "[[TOKEN]]"}`,
+			expectedBody: `{"token": "secret-token-123"}`,
+		},
+		{
+			name:         "param overrides config placeholder",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123", Placeholder: "[[TOKEN]]"},
+			params:       map[string]string{ParamPlaceholder: "<<TOKEN>>"},
+			requestBody:  `{"token": "<<TOKEN>>"}`,
+			expectedBody: `{"token": "secret-token-123"}`,
+		},
+		{
+			name:         "no matches - placeholder not found",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123"},
+			params:       map[string]string{},
+			requestBody:  `{"token": "different-placeholder"}`,
+			expectedBody: `{"token": "different-placeholder"}`,
+		},
+		{
+			name:         "empty body",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123"},
+			params:       map[string]string{},
+			requestBody:  "",
+			expectedBody: "",
+		},
+		{
+			name:         "large body with streaming",
+			config:       InjectBodyProcessorConfig{Token: "secret-token-123"},
+			params:       map[string]string{},
+			requestBody:  strings.Repeat("{{ACCESS_TOKEN}}", 10000),
+			expectedBody: strings.Repeat("secret-token-123", 10000),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc, err := tt.config.Processor(tt.params)
+			assert.NoError(t, err)
+
+			req := &http.Request{
+				Header: make(http.Header),
+			}
+			if tt.requestBody != "" {
+				req.Body = http.NoBody
+			}
+			if tt.requestBody != "" {
+				req.Body = stringToReadCloser(tt.requestBody)
+			}
+
+			err = proc(req)
+			assert.NoError(t, err)
+
+			if tt.expectedBody == "" && (tt.requestBody == "" || tt.requestBody == "nil") {
+				return
+			}
+
+			bodyBytes := new(bytes.Buffer)
+			_, err = bodyBytes.ReadFrom(req.Body)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedBody, bodyBytes.String())
+			assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+		})
+	}
+}
+
+func TestOAuthProcessorConfigBodyInjection(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       OAuthProcessorConfig
+		params       map[string]string
+		requestBody  string
+		expectedBody string
+		checkHeader  bool
+	}{
+		{
+			name: "body injection with placeholder parameter",
+			config: OAuthProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123", RefreshToken: "refresh-456"},
+			},
+			params:       map[string]string{ParamPlaceholder: "{{ACCESS_TOKEN}}"},
+			requestBody:  `{"token": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"token": "access-123"}`,
+			checkHeader:  false,
+		},
+		{
+			name: "body injection with refresh token",
+			config: OAuthProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123", RefreshToken: "refresh-456"},
+			},
+			params:       map[string]string{ParamPlaceholder: "{{TOKEN}}", ParamSubtoken: SubtokenRefresh},
+			requestBody:  `{"token": "{{TOKEN}}"}`,
+			expectedBody: `{"token": "refresh-456"}`,
+			checkHeader:  false,
+		},
+		{
+			name: "header injection when no placeholder",
+			config: OAuthProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123"},
+			},
+			params:      map[string]string{},
+			checkHeader: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc, err := tt.config.Processor(tt.params)
+			assert.NoError(t, err)
+
+			req := &http.Request{
+				Header: make(http.Header),
+			}
+			if tt.requestBody != "" {
+				req.Body = stringToReadCloser(tt.requestBody)
+			}
+
+			err = proc(req)
+			assert.NoError(t, err)
+
+			if tt.checkHeader {
+				assert.Equal(t, "Bearer access-123", req.Header.Get("Authorization"))
+			} else {
+				bodyBytes := new(bytes.Buffer)
+				_, err = bodyBytes.ReadFrom(req.Body)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedBody, bodyBytes.String())
+				assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+			}
+		})
+	}
+}
+
+func TestOAuthBodyProcessorConfig(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       OAuthBodyProcessorConfig
+		params       map[string]string
+		requestBody  string
+		expectedBody string
+	}{
+		{
+			name: "simple replacement with access token",
+			config: OAuthBodyProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123", RefreshToken: "refresh-456"},
+			},
+			params:       map[string]string{},
+			requestBody:  `{"token": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"token": "access-123"}`,
+		},
+		{
+			name: "replacement with refresh token",
+			config: OAuthBodyProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123", RefreshToken: "refresh-456"},
+			},
+			params:       map[string]string{ParamSubtoken: SubtokenRefresh},
+			requestBody:  `{"token": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"token": "refresh-456"}`,
+		},
+		{
+			name: "custom placeholder from params",
+			config: OAuthBodyProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123"},
+			},
+			params:       map[string]string{ParamPlaceholder: "<<TOKEN>>"},
+			requestBody:  `{"token": "<<TOKEN>>"}`,
+			expectedBody: `{"token": "access-123"}`,
+		},
+		{
+			name: "custom placeholder from config",
+			config: OAuthBodyProcessorConfig{
+				Token:       &OAuthToken{AccessToken: "access-123"},
+				Placeholder: "[[TOKEN]]",
+			},
+			params:       map[string]string{},
+			requestBody:  `{"token": "[[TOKEN]]"}`,
+			expectedBody: `{"token": "access-123"}`,
+		},
+		{
+			name: "multiple occurrences",
+			config: OAuthBodyProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123"},
+			},
+			params:       map[string]string{},
+			requestBody:  `{"client_id": "id", "client_secret": "secret", "token": "{{ACCESS_TOKEN}}", "token_type_hint": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"client_id": "id", "client_secret": "secret", "token": "access-123", "token_type_hint": "access-123"}`,
+		},
+		{
+			name: "nil body",
+			config: OAuthBodyProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123"},
+			},
+			params:      map[string]string{},
+			requestBody: "",
+		},
+		{
+			name: "large body with streaming",
+			config: OAuthBodyProcessorConfig{
+				Token: &OAuthToken{AccessToken: "access-123"},
+			},
+			params:       map[string]string{},
+			requestBody:  `{"data": "` + strings.Repeat("x", 50000) + `", "token": "{{ACCESS_TOKEN}}"}`,
+			expectedBody: `{"data": "` + strings.Repeat("x", 50000) + `", "token": "access-123"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc, err := tt.config.Processor(tt.params)
+			assert.NoError(t, err)
+
+			req := &http.Request{
+				Header: make(http.Header),
+			}
+			if tt.requestBody != "" {
+				req.Body = stringToReadCloser(tt.requestBody)
+			}
+
+			err = proc(req)
+			assert.NoError(t, err)
+
+			if tt.requestBody == "" {
+				return
+			}
+
+			bodyBytes := new(bytes.Buffer)
+			_, err = bodyBytes.ReadFrom(req.Body)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedBody, bodyBytes.String())
+			assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+		})
+	}
+}
+
+// Helper function to convert string to io.ReadCloser
+func stringToReadCloser(s string) io.ReadCloser {
+	return io.NopCloser(strings.NewReader(s))
 }

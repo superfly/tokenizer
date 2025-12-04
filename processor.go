@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/icholy/replace"
 	"golang.org/x/exp/slices"
 )
 
@@ -38,9 +39,15 @@ const (
 	// Default is SubtokenAccessToken.
 	ParamSubtoken = "st"
 
-	// ParamDelimiter specifies the delimiter to replace in the request body
-	// with the token value. Used by InjectBodyProcessor.
-	ParamDelimiter = "delimiter"
+	// ParamPlaceholder specifies the placeholder pattern to replace in the
+	// request body with the token value. Used by InjectBodyProcessor.
+	ParamPlaceholder = "placeholder"
+)
+
+const (
+	// MaxBodySizeForInjection limits body size for placeholder replacement
+	// to prevent memory exhaustion (default: 10MB)
+	MaxBodySizeForInjection = 10 * 1024 * 1024
 )
 
 const (
@@ -217,8 +224,8 @@ func (c *InjectHMACProcessorConfig) StripHazmat() ProcessorConfig {
 }
 
 type InjectBodyProcessorConfig struct {
-	Token     string `json:"token"`
-	Delimiter string `json:"delimiter,omitempty"`
+	Token       string `json:"token"`
+	Placeholder string `json:"placeholder,omitempty"`
 }
 
 var _ ProcessorConfig = new(InjectBodyProcessorConfig)
@@ -228,34 +235,34 @@ func (c *InjectBodyProcessorConfig) Processor(params map[string]string) (Request
 		return nil, errors.New("missing token")
 	}
 
-	// Get delimiter from params or use config default or fallback
-	delimiter := c.Delimiter
-	if paramDelim, ok := params[ParamDelimiter]; ok {
-		delimiter = paramDelim
+	// Get placeholder from params or use config default or fallback
+	placeholder := c.Placeholder
+	if paramPlaceholder, ok := params[ParamPlaceholder]; ok {
+		placeholder = paramPlaceholder
 	}
-	if delimiter == "" {
-		delimiter = "{{ACCESS_TOKEN}}"
+	if placeholder == "" {
+		placeholder = "{{ACCESS_TOKEN}}"
 	}
 
 	return func(r *http.Request) error {
-		// Read the entire request body
 		if r.Body == nil {
 			return nil
 		}
 
-		bodyBytes, err := io.ReadAll(r.Body)
+		// Use streaming replacement to avoid loading entire body into memory
+		chain := replace.Chain(r.Body, replace.String(placeholder, c.Token))
+
+		// Buffer the replaced content to calculate Content-Length
+		var buf bytes.Buffer
+		n, err := io.Copy(&buf, chain)
 		if err != nil {
-			return fmt.Errorf("failed to read request body: %w", err)
+			return fmt.Errorf("failed to replace placeholder in request body: %w", err)
 		}
 		r.Body.Close()
 
-		// Replace delimiter with token
-		bodyStr := string(bodyBytes)
-		newBody := strings.ReplaceAll(bodyStr, delimiter, c.Token)
-
-		// Set the new body
-		r.Body = io.NopCloser(strings.NewReader(newBody))
-		r.ContentLength = int64(len(newBody))
+		// Set the new body with updated Content-Length
+		r.Body = io.NopCloser(&buf)
+		r.ContentLength = n
 
 		return nil
 	}, nil
@@ -263,8 +270,8 @@ func (c *InjectBodyProcessorConfig) Processor(params map[string]string) (Request
 
 func (c *InjectBodyProcessorConfig) StripHazmat() ProcessorConfig {
 	return &InjectBodyProcessorConfig{
-		Token:     redactedStr,
-		Delimiter: c.Delimiter,
+		Token:       redactedStr,
+		Placeholder: c.Placeholder,
 	}
 }
 
@@ -289,27 +296,28 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 		return nil, errors.New("missing token")
 	}
 
-	// Check if delimiter parameter is present for body injection
-	if delimiter, ok := params[ParamDelimiter]; ok && delimiter != "" {
-		// Inject token into request body by replacing delimiter
+	// Check if placeholder parameter is present for body injection
+	if placeholder, ok := params[ParamPlaceholder]; ok && placeholder != "" {
+		// Inject token into request body by replacing placeholder
 		return func(r *http.Request) error {
 			if r.Body == nil {
 				return nil
 			}
 
-			bodyBytes, err := io.ReadAll(r.Body)
+			// Use streaming replacement to avoid loading entire body into memory
+			chain := replace.Chain(r.Body, replace.String(placeholder, token))
+
+			// Buffer the replaced content to calculate Content-Length
+			var buf bytes.Buffer
+			n, err := io.Copy(&buf, chain)
 			if err != nil {
-				return fmt.Errorf("failed to read request body: %w", err)
+				return fmt.Errorf("failed to replace placeholder in request body: %w", err)
 			}
 			r.Body.Close()
 
-			// Replace delimiter with token
-			bodyStr := string(bodyBytes)
-			newBody := strings.ReplaceAll(bodyStr, delimiter, token)
-
-			// Set the new body
-			r.Body = io.NopCloser(strings.NewReader(newBody))
-			r.ContentLength = int64(len(newBody))
+			// Set the new body with updated Content-Length
+			r.Body = io.NopCloser(&buf)
+			r.ContentLength = n
 
 			return nil
 		}, nil
@@ -332,8 +340,8 @@ func (c *OAuthProcessorConfig) StripHazmat() ProcessorConfig {
 }
 
 type OAuthBodyProcessorConfig struct {
-	Token     *OAuthToken `json:"token"`
-	Delimiter string      `json:"delimiter,omitempty"`
+	Token       *OAuthToken `json:"token"`
+	Placeholder string      `json:"placeholder,omitempty"`
 }
 
 var _ ProcessorConfig = (*OAuthBodyProcessorConfig)(nil)
@@ -348,34 +356,34 @@ func (c *OAuthBodyProcessorConfig) Processor(params map[string]string) (RequestP
 		return nil, errors.New("missing token")
 	}
 
-	// Get delimiter from params or use config default or fallback
-	delimiter := c.Delimiter
-	if paramDelim, ok := params[ParamDelimiter]; ok {
-		delimiter = paramDelim
+	// Get placeholder from params or use config default or fallback
+	placeholder := c.Placeholder
+	if paramPlaceholder, ok := params[ParamPlaceholder]; ok {
+		placeholder = paramPlaceholder
 	}
-	if delimiter == "" {
-		delimiter = "{{ACCESS_TOKEN}}"
+	if placeholder == "" {
+		placeholder = "{{ACCESS_TOKEN}}"
 	}
 
 	return func(r *http.Request) error {
-		// Read the entire request body
 		if r.Body == nil {
 			return nil
 		}
 
-		bodyBytes, err := io.ReadAll(r.Body)
+		// Use streaming replacement to avoid loading entire body into memory
+		chain := replace.Chain(r.Body, replace.String(placeholder, token))
+
+		// Buffer the replaced content to calculate Content-Length
+		var buf bytes.Buffer
+		n, err := io.Copy(&buf, chain)
 		if err != nil {
-			return fmt.Errorf("failed to read request body: %w", err)
+			return fmt.Errorf("failed to replace placeholder in request body: %w", err)
 		}
 		r.Body.Close()
 
-		// Replace delimiter with token
-		bodyStr := string(bodyBytes)
-		newBody := strings.ReplaceAll(bodyStr, delimiter, token)
-
-		// Set the new body
-		r.Body = io.NopCloser(strings.NewReader(newBody))
-		r.ContentLength = int64(len(newBody))
+		// Set the new body with updated Content-Length
+		r.Body = io.NopCloser(&buf)
+		r.ContentLength = n
 
 		return nil
 	}, nil
@@ -387,7 +395,7 @@ func (c *OAuthBodyProcessorConfig) StripHazmat() ProcessorConfig {
 			AccessToken:  redactedStr,
 			RefreshToken: redactedStr,
 		},
-		Delimiter: c.Delimiter,
+		Placeholder: c.Placeholder,
 	}
 }
 
