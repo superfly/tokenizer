@@ -45,12 +45,6 @@ const (
 )
 
 const (
-	// MaxBodySizeForInjection limits body size for placeholder replacement
-	// to prevent memory exhaustion (default: 10MB)
-	MaxBodySizeForInjection = 10 * 1024 * 1024
-)
-
-const (
 	SubtokenAccess  = "access"
 	SubtokenRefresh = "refresh"
 )
@@ -252,17 +246,10 @@ func (c *InjectBodyProcessorConfig) Processor(params map[string]string) (Request
 		// Use streaming replacement to avoid loading entire body into memory
 		chain := replace.Chain(r.Body, replace.String(placeholder, c.Token))
 
-		// Buffer the replaced content to calculate Content-Length
-		var buf bytes.Buffer
-		n, err := io.Copy(&buf, chain)
-		if err != nil {
-			return fmt.Errorf("failed to replace placeholder in request body: %w", err)
-		}
-		r.Body.Close()
-
-		// Set the new body with updated Content-Length
-		r.Body = io.NopCloser(&buf)
-		r.ContentLength = n
+		// Set body to the replacement chain for true streaming with chunked encoding
+		// Setting ContentLength to 0 triggers chunked transfer encoding
+		r.Body = io.NopCloser(chain)
+		r.ContentLength = 0
 
 		return nil
 	}, nil
@@ -307,17 +294,10 @@ func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProce
 			// Use streaming replacement to avoid loading entire body into memory
 			chain := replace.Chain(r.Body, replace.String(placeholder, token))
 
-			// Buffer the replaced content to calculate Content-Length
-			var buf bytes.Buffer
-			n, err := io.Copy(&buf, chain)
-			if err != nil {
-				return fmt.Errorf("failed to replace placeholder in request body: %w", err)
-			}
-			r.Body.Close()
-
-			// Set the new body with updated Content-Length
-			r.Body = io.NopCloser(&buf)
-			r.ContentLength = n
+			// Set body to the replacement chain for true streaming with chunked encoding
+			// Setting ContentLength to 0 triggers chunked transfer encoding
+			r.Body = io.NopCloser(chain)
+			r.ContentLength = 0
 
 			return nil
 		}, nil
@@ -373,17 +353,10 @@ func (c *OAuthBodyProcessorConfig) Processor(params map[string]string) (RequestP
 		// Use streaming replacement to avoid loading entire body into memory
 		chain := replace.Chain(r.Body, replace.String(placeholder, token))
 
-		// Buffer the replaced content to calculate Content-Length
-		var buf bytes.Buffer
-		n, err := io.Copy(&buf, chain)
-		if err != nil {
-			return fmt.Errorf("failed to replace placeholder in request body: %w", err)
-		}
-		r.Body.Close()
-
-		// Set the new body with updated Content-Length
-		r.Body = io.NopCloser(&buf)
-		r.ContentLength = n
+		// Set body to the replacement chain for true streaming with chunked encoding
+		// Setting ContentLength to 0 triggers chunked transfer encoding
+		r.Body = io.NopCloser(chain)
+		r.ContentLength = 0
 
 		return nil
 	}, nil

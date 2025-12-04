@@ -197,7 +197,8 @@ func TestInjectBodyProcessorConfig(t *testing.T) {
 			_, err = bodyBytes.ReadFrom(req.Body)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedBody, bodyBytes.String())
-			assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+			// ContentLength is 0 for chunked transfer encoding
+			assert.Equal(t, int64(0), req.ContentLength)
 		})
 	}
 }
@@ -272,7 +273,8 @@ func TestOAuthProcessorConfigBodyInjection(t *testing.T) {
 				_, err = bodyBytes.ReadFrom(req.Body)
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedBody, bodyBytes.String())
-				assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+				// ContentLength is 0 for chunked transfer encoding
+				assert.Equal(t, int64(0), req.ContentLength)
 				// Authorization header should NOT be set during body injection
 				assert.Equal(t, "", req.Header.Get("Authorization"))
 			}
@@ -376,7 +378,8 @@ func TestOAuthBodyProcessorConfig(t *testing.T) {
 			_, err = bodyBytes.ReadFrom(req.Body)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedBody, bodyBytes.String())
-			assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+			// ContentLength is 0 for chunked transfer encoding
+			assert.Equal(t, int64(0), req.ContentLength)
 		})
 	}
 }
