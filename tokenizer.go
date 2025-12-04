@@ -122,12 +122,8 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 		opt(tkz)
 	}
 
-	if tkz.flysrcParser == nil {
-		parser, err := flysrc.New()
-		if err != nil {
-			logrus.WithError(err).Panic("Error making flysrc parser")
-		}
-		tkz.flysrcParser = parser
+	if tkz.RequireFlySrc && tkz.flysrcParser == nil {
+		logrus.Panic("FlySrc is required but no flysrc Parser is specified")
 	}
 
 	hostnameMap := map[string]bool{}
@@ -282,19 +278,21 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
 	}
 
-	src, err := t.flysrcParser.FromRequest(req)
-	if err != nil {
-		if t.RequireFlySrc {
-			pud.reqLog.Warn(err.Error())
-			return nil, errorResponse(ErrBadRequest)
+	if t.flysrcParser != nil {
+		src, err := t.flysrcParser.FromRequest(req)
+		if err != nil {
+			if t.RequireFlySrc {
+				pud.reqLog.Warn(err.Error())
+				return nil, errorResponse(ErrBadRequest)
+			}
+		} else {
+			pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
+				"flysrc-org":       src.Org,
+				"flysrc-app":       src.App,
+				"flysrc-instance":  src.Instance,
+				"flysrc-timestamp": src.Timestamp,
+			})
 		}
-	} else {
-		pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
-			"flysrc-org":       src.Org,
-			"flysrc-app":       src.App,
-			"flysrc-instance":  src.Instance,
-			"flysrc-timestamp": src.Timestamp,
-		})
 	}
 
 	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
