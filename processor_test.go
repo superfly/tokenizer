@@ -257,13 +257,24 @@ func TestOAuthProcessorConfigBodyInjection(t *testing.T) {
 			assert.NoError(t, err)
 
 			if tt.checkHeader {
+				// Header injection: verify Authorization header is set and body is unchanged
 				assert.Equal(t, "Bearer access-123", req.Header.Get("Authorization"))
+				// Body should be unchanged (nil or original)
+				if tt.requestBody != "" {
+					bodyBytes := new(bytes.Buffer)
+					_, err = bodyBytes.ReadFrom(req.Body)
+					assert.NoError(t, err)
+					assert.Equal(t, tt.requestBody, bodyBytes.String())
+				}
 			} else {
+				// Body injection: verify body is modified and Authorization header is NOT set
 				bodyBytes := new(bytes.Buffer)
 				_, err = bodyBytes.ReadFrom(req.Body)
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedBody, bodyBytes.String())
 				assert.Equal(t, int64(len(tt.expectedBody)), req.ContentLength)
+				// Authorization header should NOT be set during body injection
+				assert.Equal(t, "", req.Header.Get("Authorization"))
 			}
 		})
 	}
