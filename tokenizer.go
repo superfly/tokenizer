@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -48,6 +49,10 @@ type tokenizer struct {
 	// OpenProxy dictates whether requests without any sealed secrets are allowed.
 	OpenProxy bool
 
+	// MitmEnabled enables HTTPS MITM proxying with CA certificate.
+	// When enabled, the proxy can intercept HTTPS connections to inject credentials.
+	MitmEnabled bool
+
 	// RequireFlySrc will reject requests without a fly-src when set.
 	RequireFlySrc bool
 
@@ -74,6 +79,20 @@ type Option func(*tokenizer)
 func OpenProxy() Option {
 	return func(t *tokenizer) {
 		t.OpenProxy = true
+	}
+}
+
+// MitmCACert configures the CA certificate for HTTPS MITM proxying.
+// When configured, the proxy can intercept HTTPS CONNECT requests and
+// inject credentials into them. Clients must trust this CA certificate.
+func MitmCACert(cert tls.Certificate) Option {
+	return func(t *tokenizer) {
+		t.MitmEnabled = true
+		goproxy.GoproxyCa = cert
+		goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
+		goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
+		goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: goproxy.TLSConfigFromCA(&cert)}
+		goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: nil}
 	}
 }
 
@@ -168,7 +187,7 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	})
 
 	proxy.Tr = &http.Transport{
-		Dial: dialFunc(tkz.tokenizerHostnames),
+		Dial: tkz.dialFunc(),
 		// probably not necessary, but I don't want to worry about desync/smuggling
 		DisableKeepAlives: true,
 	}
@@ -217,7 +236,7 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 	}
 
 	_, port, _ := strings.Cut(host, ":")
-	if port == "443" {
+	if port == "443" && !t.MitmEnabled {
 		pud.connLog.Warn("attempt to proxy to https downstream")
 		ctx.Resp = errorResponse(ErrBadRequest)
 		return goproxy.RejectConnect, ""
@@ -236,6 +255,11 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 	pud.connectProcessors = connectProcessors
 	ctx.UserData = pud
 
+	// For HTTPS (port 443) with MITM enabled, use MitmConnect to do TLS interception
+	// For HTTP tunnels, use HTTPMitmConnect to read plaintext HTTP
+	if port == "443" && t.MitmEnabled {
+		return goproxy.MitmConnect, host
+	}
 	return goproxy.HTTPMitmConnect, host
 }
 
@@ -268,7 +292,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 
 	if !ok || !pud.requestStart.IsZero() || pud.reqLog != nil {
 		logrus.Warn("bad proxyUserData")
-		return nil, errorResponse(ErrInternal)
+		return req, errorResponse(ErrInternal)
 	}
 
 	pud.requestStart = time.Now()
@@ -283,7 +307,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		if err != nil {
 			if t.RequireFlySrc {
 				pud.reqLog.Warn(err.Error())
-				return nil, errorResponse(ErrBadRequest)
+				return req, errorResponse(ErrBadRequest)
 			}
 		} else {
 			pud.reqLog = pud.reqLog.WithFields(logrus.Fields{
@@ -309,7 +333,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 
 	if len(processors) == 0 && !t.OpenProxy {
 		pud.reqLog.Warn("no processors")
-		return nil, errorResponse(ErrBadRequest)
+		return req, errorResponse(ErrBadRequest)
 	}
 
 	pud.reqLog = pud.reqLog.WithField("processors", len(processors))
@@ -317,7 +341,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 	for _, processor := range processors {
 		if err := processor(req); err != nil {
 			pud.reqLog.WithError(err).Warn("run processor")
-			return nil, errorResponse(ErrBadRequest)
+			return req, errorResponse(ErrBadRequest)
 		}
 	}
 
@@ -459,11 +483,20 @@ func errorResponse(err error) *http.Response {
 	}
 
 	return &http.Response{
+		Status:     http.StatusText(status),
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		StatusCode: status,
 		Body:       io.NopCloser(bytes.NewReader([]byte(err.Error()))),
 		Header:     make(http.Header),
+		Request: &http.Request{
+			Method:     "CONNECT",
+			URL:        &url.URL{},
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+		},
 	}
 }
 
@@ -475,7 +508,8 @@ func errorResponse(err error) *http.Response {
 //     our proxy can't do passthrough TLS.
 //   - It forces the upstream connection to be TLS. We want the actual upstream
 //     connection to be over TLS because security.
-func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
+func (t *tokenizer) dialFunc() func(string, string) (net.Conn, error) {
+	badAddrs := t.tokenizerHostnames
 	_, fdaaNet, err := net.ParseCIDR("fdaa::/8")
 	if err != nil {
 		panic(err)
@@ -527,7 +561,12 @@ func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
 		}
 		switch port {
 		case "443":
-			return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
+			if !t.MitmEnabled {
+				return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
+			}
+			addr = fmt.Sprintf("%s:%s", hostname, port)
+
+			return netDialer.Dial(network, addr)
 		case "80", "":
 			port = "443"
 		}
