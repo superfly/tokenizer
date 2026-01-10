@@ -42,6 +42,9 @@ func init() {
 
 const headerProxyTokenizer = "Proxy-Tokenizer"
 
+// TokenizerHeaders is the list of headers to check for sealed secrets, in priority order
+var TokenizerHeaders = []string{headerProxyTokenizer}
+
 type tokenizer struct {
 	*goproxy.ProxyHttpServer
 
@@ -370,7 +373,13 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 }
 
 func (t *tokenizer) processorsFromRequest(req *http.Request) ([]RequestProcessor, string, error) {
-	hdrs := req.Header[headerProxyTokenizer]
+	var hdrs []string
+	for _, headerName := range TokenizerHeaders {
+		if values := req.Header[headerName]; len(values) > 0 {
+			hdrs = values
+			break
+		}
+	}
 	processors := make([]RequestProcessor, 0, len(hdrs))
 
 	var safeSecret string

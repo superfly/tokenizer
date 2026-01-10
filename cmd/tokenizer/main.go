@@ -24,9 +24,13 @@ import (
 // Package variables can be overridden at build time:
 //
 //	go build -ldflags="-X 'github.com/superfly/tokenizer/cmd/tokenizer.FilteredHeaders=Foo,Bar,Baz'"
+//	go build -ldflags="-X 'github.com/superfly/tokenizer/cmd/tokenizer.TokenizerHeaders=X-Api-Key,X-Auth-Token'"
 var (
 	// Comma separated list of headers to strip from requests.
 	FilteredHeaders = ""
+
+	// Comma separated list of headers to check for sealed secrets, in priority order.
+	TokenizerHeaders = ""
 
 	// Address for HTTP proxy to listen at.
 	ListenAddress = ":8080"
@@ -48,6 +52,18 @@ func init() {
 			tokenizer.FilteredHeaders = append(tokenizer.FilteredHeaders, h)
 		}
 	}
+
+	for _, h := range strings.Split(TokenizerHeaders, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			tokenizer.TokenizerHeaders = append(tokenizer.TokenizerHeaders, h)
+		}
+	}
+	for _, h := range strings.Split(os.Getenv("TOKENIZER_HEADERS"), ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			tokenizer.TokenizerHeaders = append(tokenizer.TokenizerHeaders, h)
+		}
+	}
+
 	if addr := os.Getenv("LISTEN_ADDRESS"); addr != "" {
 		ListenAddress = addr
 	}
