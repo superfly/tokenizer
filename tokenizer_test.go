@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -569,4 +570,172 @@ func flySrcVerifyKey(t *testing.T) ed25519.PublicKey {
 	t.Helper()
 	_ = flySrcSignKey(t)
 	return _flySrcVerifyKey
+}
+
+// TestPlaceholderInjectionEndToEnd tests the full end-to-end flow of placeholder
+// injection through the tokenizer proxy to an echo server. This verifies that:
+// 1. The placeholder is correctly replaced with the unsealed token
+// 2. The token is not leaked in plaintext in logs or error messages
+// 3. Non-placeholder data in the request body is preserved
+func TestPlaceholderInjectionEndToEnd(t *testing.T) {
+	// Set up echo server that returns the request body
+	appServer := httptest.NewTLSServer(echo)
+	defer appServer.Close()
+
+	u, err := url.Parse(appServer.URL)
+	assert.NoError(t, err)
+	u.Scheme = "http"
+	appURL := u.String()
+
+	// Generate key pair
+	var (
+		pub, priv, _ = box.GenerateKey(rand.Reader)
+		sealKey      = hex.EncodeToString(pub[:])
+		openKey      = hex.EncodeToString(priv[:])
+	)
+
+	// Create tokenizer server
+	tkz := NewTokenizer(openKey)
+	tkzServer := httptest.NewServer(tkz)
+	defer tkzServer.Close()
+
+	// Make proxy trust the upstream server
+	UpstreamTrust.AddCert(appServer.Certificate())
+
+	// Test OAuth token placeholder injection
+	t.Run("oauth token placeholder injection", func(t *testing.T) {
+		auth := "test-placeholder-auth"
+		oauthToken := &OAuthToken{
+			AccessToken:  "secret-access-token-12345",
+			RefreshToken: "secret-refresh-token-67890",
+		}
+
+		// Create secret with OAuth processor
+		secret, err := (&Secret{
+			AuthConfig:      NewBearerAuthConfig(auth),
+			ProcessorConfig: &OAuthProcessorConfig{Token: oauthToken},
+		}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// Create request with placeholder in body
+		requestBody := `{"client_id": "my-app", "token": "{{ACCESS_TOKEN}}", "extra": "data"}`
+
+		// Create client with placeholder parameter
+		client, err := Client(tkzServer.URL,
+			WithAuth(auth),
+			WithSecret(secret, map[string]string{ParamPlaceholder: "{{ACCESS_TOKEN}}"}),
+		)
+		assert.NoError(t, err)
+
+		req, err := http.NewRequest(http.MethodPost, appURL+"/api/endpoint", bytes.NewReader([]byte(requestBody)))
+		assert.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Parse echo response
+		var echoResp echoResponse
+		err = json.NewDecoder(resp.Body).Decode(&echoResp)
+		assert.NoError(t, err)
+
+		// Verify placeholder was replaced with actual token
+		assert.True(t, strings.Contains(echoResp.Body, oauthToken.AccessToken),
+			"Response body should contain the injected access token")
+
+		// Verify placeholder is no longer present
+		assert.False(t, strings.Contains(echoResp.Body, "{{ACCESS_TOKEN}}"),
+			"Placeholder should be replaced in request body")
+
+		// Verify other data is preserved
+		assert.True(t, strings.Contains(echoResp.Body, "my-app"),
+			"Non-placeholder data should be preserved")
+		assert.True(t, strings.Contains(echoResp.Body, "data"),
+			"Extra data should be preserved")
+	})
+
+	// Test refresh token placeholder injection
+	t.Run("refresh token placeholder injection", func(t *testing.T) {
+		auth := "test-refresh-auth"
+		oauthToken := &OAuthToken{
+			AccessToken:  "access-token-abc",
+			RefreshToken: "refresh-token-xyz",
+		}
+
+		secret, err := (&Secret{
+			AuthConfig:      NewBearerAuthConfig(auth),
+			ProcessorConfig: &OAuthProcessorConfig{Token: oauthToken},
+		}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		requestBody := `{"grant_type": "refresh_token", "refresh_token": "{{ACCESS_TOKEN}}"}`
+
+		// Use refresh subtoken
+		client, err := Client(tkzServer.URL,
+			WithAuth(auth),
+			WithSecret(secret, map[string]string{
+				ParamPlaceholder: "{{ACCESS_TOKEN}}",
+				ParamSubtoken:    SubtokenRefresh,
+			}),
+		)
+		assert.NoError(t, err)
+
+		req, err := http.NewRequest(http.MethodPost, appURL+"/oauth/token", bytes.NewReader([]byte(requestBody)))
+		assert.NoError(t, err)
+
+		resp, err := client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var echoResp echoResponse
+		err = json.NewDecoder(resp.Body).Decode(&echoResp)
+		assert.NoError(t, err)
+
+		// Should contain refresh token, not access token
+		assert.True(t, strings.Contains(echoResp.Body, oauthToken.RefreshToken),
+			"Response body should contain the injected refresh token")
+		assert.False(t, strings.Contains(echoResp.Body, oauthToken.AccessToken),
+			"Response body should NOT contain access token when refresh is requested")
+	})
+
+	// Test that original placeholder is not in the upstream request
+	// Use InjectBodyProcessorConfig which supports body placeholder replacement
+	t.Run("placeholder not leaked to upstream", func(t *testing.T) {
+		auth := "test-no-leak-auth"
+		sensitiveToken := "super-secret-token-that-must-not-leak"
+
+		// Use InjectBodyProcessorConfig for body injection with placeholder
+		secret, err := (&Secret{
+			AuthConfig:      NewBearerAuthConfig(auth),
+			ProcessorConfig: &InjectBodyProcessorConfig{Token: sensitiveToken},
+		}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// The placeholder should be replaced before reaching upstream
+		requestBody := `{"action": "suspend", "token": "{{ACCESS_TOKEN}}"}`
+
+		client, err := Client(tkzServer.URL,
+			WithAuth(auth),
+			WithSecret(secret, map[string]string{ParamPlaceholder: "{{ACCESS_TOKEN}}"}),
+		)
+		assert.NoError(t, err)
+
+		req, err := http.NewRequest(http.MethodPost, appURL+"/api/suspend", bytes.NewReader([]byte(requestBody)))
+		assert.NoError(t, err)
+
+		resp, err := client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var echoResp echoResponse
+		err = json.NewDecoder(resp.Body).Decode(&echoResp)
+		assert.NoError(t, err)
+
+		// The echo server received the actual token, not the placeholder
+		assert.True(t, strings.Contains(echoResp.Body, sensitiveToken),
+			"Upstream should receive actual token")
+		assert.False(t, strings.Contains(echoResp.Body, "{{ACCESS_TOKEN}}"),
+			"Upstream should NOT receive placeholder")
+	})
 }

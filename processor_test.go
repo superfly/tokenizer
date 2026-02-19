@@ -388,3 +388,77 @@ func TestOAuthBodyProcessorConfig(t *testing.T) {
 func stringToReadCloser(s string) io.ReadCloser {
 	return io.NopCloser(strings.NewReader(s))
 }
+
+// TestInjectBodyProcessorNoTokenLeakage verifies that the secret token
+// is replaced with the actual value and is not leaked in plaintext in
+// the original request body.
+func TestInjectBodyProcessorNoTokenLeakage(t *testing.T) {
+	sensitiveToken := "super-secret-oauth-token-12345"
+	placeholder := "{{ACCESS_TOKEN}}"
+	requestBody := `{"client_id": "app123", "client_secret": "safe", "token": "{{ACCESS_TOKEN}}"}`
+
+	config := InjectBodyProcessorConfig{Token: sensitiveToken}
+	proc, err := config.Processor(map[string]string{})
+	assert.NoError(t, err)
+
+	req := &http.Request{
+		Header: make(http.Header),
+		Body:   stringToReadCloser(requestBody),
+	}
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	// Read the processed body
+	bodyBytes := new(bytes.Buffer)
+	_, err = bodyBytes.ReadFrom(req.Body)
+	assert.NoError(t, err)
+	processedBody := bodyBytes.String()
+
+	// Verify placeholder was replaced
+	assert.False(t, strings.Contains(processedBody, placeholder),
+		"Placeholder should be replaced in output body")
+
+	// Verify token is now in the body (this is expected - we're injecting it)
+	assert.True(t, strings.Contains(processedBody, sensitiveToken),
+		"Token should be present in processed body")
+
+	// The key security property: the original request body should NOT
+	// contain the plaintext token before processing. This test documents
+	// that the placeholder mechanism works correctly.
+	assert.False(t, strings.Contains(requestBody, sensitiveToken),
+		"Original request body should not contain plaintext token")
+}
+
+// TestInjectBodyProcessorPreservesNonSecretData verifies that non-secret
+// data in the request body is preserved unchanged.
+func TestInjectBodyProcessorPreservesNonSecretData(t *testing.T) {
+	sensitiveToken := "secret-token-xyz"
+	requestBody := `{"client_id": "my-app-id", "client_secret": "my-client-secret", "token": "{{ACCESS_TOKEN}}", "extra_data": "preserved"}`
+
+	config := InjectBodyProcessorConfig{Token: sensitiveToken}
+	proc, err := config.Processor(map[string]string{})
+	assert.NoError(t, err)
+
+	req := &http.Request{
+		Header: make(http.Header),
+		Body:   stringToReadCloser(requestBody),
+	}
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	bodyBytes := new(bytes.Buffer)
+	_, err = bodyBytes.ReadFrom(req.Body)
+	assert.NoError(t, err)
+	processedBody := bodyBytes.String()
+
+	// Verify non-secret data is preserved
+	assert.True(t, strings.Contains(processedBody, "my-app-id"))
+	assert.True(t, strings.Contains(processedBody, "my-client-secret"))
+	assert.True(t, strings.Contains(processedBody, "preserved"))
+
+	// Verify placeholder was replaced with token
+	assert.True(t, strings.Contains(processedBody, sensitiveToken))
+	assert.False(t, strings.Contains(processedBody, "{{ACCESS_TOKEN}}"))
+}

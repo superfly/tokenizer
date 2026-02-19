@@ -2,4 +2,7 @@
 *.pem
 /bin/*
 /.envrc
-.vscode
+.DS_Store
+/tokenizer
+/foo.toml
+/cmd/unsealtoken/
