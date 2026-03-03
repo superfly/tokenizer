@@ -424,6 +424,10 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 					return err
 				}
 
+				// FIXME: These are swapped. SigV4 credential format is
+				// AKID/date/region/service/aws4_request, so credParts[2] is region
+				// and credParts[3] is service. Left as-is to avoid breaking existing
+				// clients that may depend on this behavior.
 				service = credParts[2]
 				region = credParts[3]
 				break
@@ -458,6 +462,16 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 		r.Header.Del("Proxy-Connection")
 		r.Header.Del("Proxy-Authenticate")
 		r.Header.Del("Proxy-Authorization")
+
+		// Remove standard reverse proxy headers that may be injected by upstream proxies
+		// (e.g., fly-proxy). These headers get signed but may be modified by outbound
+		// proxies, causing SignatureDoesNotMatch errors.
+		r.Header.Del("Via")
+		r.Header.Del("X-Forwarded-For")
+		r.Header.Del("X-Forwarded-Port")
+		r.Header.Del("X-Forwarded-Proto")
+		r.Header.Del("X-Forwarded-Ssl")
+		r.Header.Del("X-Request-Start")
 
 		signer := v4.NewSigner()
 		err = signer.SignHTTP(r.Context(), credentials, r, r.Header.Get("X-Amz-Content-Sha256"), service, region, date)
