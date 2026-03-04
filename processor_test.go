@@ -2,6 +2,7 @@ package tokenizer
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -387,4 +388,69 @@ func TestOAuthBodyProcessorConfig(t *testing.T) {
 // Helper function to convert string to io.ReadCloser
 func stringToReadCloser(s string) io.ReadCloser {
 	return io.NopCloser(strings.NewReader(s))
+}
+
+func TestSigv4Processor(t *testing.T) {
+	parseAuthHeader := func(s string) (string, string, string, string) {
+		// AWS4-HMAC-SHA256 Credential=AccessKey/20260304/service/region/aws4_request, SignedHeaders=host;x-amz-date, Signature=674b77f7c09adf9becb2eb1c70183bb4e828330063b8b1577dfc64001074ea3d
+		var accessKey, dateStr, region, service string
+		words := strings.Split(strings.TrimPrefix(s, "AWS4-HMAC-SHA256 "), ", ")
+		for _, word := range words {
+			kv := strings.SplitN(word, "=", 2)
+			if len(kv) == 2 {
+				if kv[0] == "Credential" {
+					parts := strings.Split(kv[1], "/")
+					if len(parts) == 5 {
+						accessKey = parts[0]
+						dateStr = parts[1]
+						region = parts[2]
+						service = parts[3]
+					}
+				}
+			}
+		}
+		return accessKey, dateStr, region, service
+	}
+
+	// Build our base request and Verify that we're parsing out the fields in the correct order...
+	r, err := http.NewRequest(http.MethodGet, "https://www.test.com/path", http.NoBody)
+	assert.NoError(t, err)
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AccessKey/20260304/region/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=792ff6fc18a10db6bc1ae6a8f9ffb0caf1432da8d2008e33203a9a0434cd9127")
+	akey, d, reg, svc := parseAuthHeader(r.Header.Get("Authorization"))
+	assert.Equal(t, akey, "AccessKey")
+	assert.Equal(t, d, "20260304")
+	assert.Equal(t, reg, "region")
+	assert.Equal(t, svc, "service")
+
+	// The processor will swap region/service when NoSwap is false for bug compat.
+	cfgSwap := &Sigv4ProcessorConfig{"AccessKey", "SecretKey", false}
+	processSwap, err := cfgSwap.Processor(nil)
+	assert.NoError(t, err)
+
+	req := r.Clone(context.Background())
+	//fmt.Printf("Before: (swap) %v\n", req.Header.Get("Authorization"))
+	err = processSwap(req)
+	assert.NoError(t, err)
+	//fmt.Printf("After: (swap)  %v\n", req.Header.Get("Authorization"))
+	akey, d, reg, svc = parseAuthHeader(req.Header.Get("Authorization"))
+	assert.Equal(t, akey, "AccessKey")
+	assert.Equal(t, d, "20260304")
+	assert.Equal(t, reg, "service") // swapped!
+	assert.Equal(t, svc, "region")  // swapped!
+
+	// The processor will not swap region/service when NoSwap is true.
+	cfg := &Sigv4ProcessorConfig{"AccessKey", "SecretKey", true}
+	process, err := cfg.Processor(nil)
+	assert.NoError(t, err)
+
+	req = r.Clone(context.Background())
+	//fmt.Printf("Before: (noswap) %v\n", req.Header.Get("Authorization"))
+	err = process(req)
+	assert.NoError(t, err)
+	//fmt.Printf("After:  (noswap) %v\n", req.Header.Get("Authorization"))
+	akey, d, reg, svc = parseAuthHeader(req.Header.Get("Authorization"))
+	assert.Equal(t, akey, "AccessKey")
+	assert.Equal(t, d, "20260304")
+	assert.Equal(t, reg, "region")
+	assert.Equal(t, svc, "service")
 }

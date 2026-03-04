@@ -375,6 +375,7 @@ func (c *OAuthBodyProcessorConfig) StripHazmat() ProcessorConfig {
 type Sigv4ProcessorConfig struct {
 	AccessKey string `json:"access_key"`
 	SecretKey string `json:"secret_key"`
+	NoSwap    bool   `json:"no_swap"` // Bug compat, when false region/service get swapped.
 }
 
 var _ ProcessorConfig = (*Sigv4ProcessorConfig)(nil)
@@ -424,8 +425,12 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 					return err
 				}
 
-				service = credParts[2]
-				region = credParts[3]
+				region = credParts[2]
+				service = credParts[3]
+				if !c.NoSwap {
+					// Bug compat: swap service and region when NoSwap is not set.
+					region, service = service, region
+				}
 				break
 			}
 		}
