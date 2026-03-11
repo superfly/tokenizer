@@ -375,6 +375,7 @@ func (c *OAuthBodyProcessorConfig) StripHazmat() ProcessorConfig {
 type Sigv4ProcessorConfig struct {
 	AccessKey string `json:"access_key"`
 	SecretKey string `json:"secret_key"`
+	NoSwap    bool   `json:"no_swap"` // Bug compat, when false region/service get swapped.
 }
 
 var _ ProcessorConfig = (*Sigv4ProcessorConfig)(nil)
@@ -424,12 +425,12 @@ func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProce
 					return err
 				}
 
-				// FIXME: These are swapped. SigV4 credential format is
-				// AKID/date/region/service/aws4_request, so credParts[2] is region
-				// and credParts[3] is service. Left as-is to avoid breaking existing
-				// clients that may depend on this behavior.
-				service = credParts[2]
-				region = credParts[3]
+				region = credParts[2]
+				service = credParts[3]
+				if !c.NoSwap {
+					// Bug compat: swap service and region when NoSwap is not set.
+					region, service = service, region
+				}
 				break
 			}
 		}
