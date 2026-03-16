@@ -570,3 +570,136 @@ func flySrcVerifyKey(t *testing.T) ed25519.PublicKey {
 	_ = flySrcSignKey(t)
 	return _flySrcVerifyKey
 }
+
+func TestTokenizerHeaders(t *testing.T) {
+	appServer := httptest.NewTLSServer(echo)
+	defer appServer.Close()
+
+	u, err := url.Parse(appServer.URL)
+	assert.NoError(t, err)
+	u.Scheme = "http"
+	appURL := u.String()
+
+	var (
+		pub, priv, _ = box.GenerateKey(rand.Reader)
+		sealKey      = hex.EncodeToString(pub[:])
+		openKey      = hex.EncodeToString(priv[:])
+	)
+
+	UpstreamTrust.AddCert(appServer.Certificate())
+
+	t.Run("default header Proxy-Tokenizer", func(t *testing.T) {
+		origHeaders := TokenizerHeaders
+		defer func() { TokenizerHeaders = origHeaders }()
+
+		// Set default to only Proxy-Tokenizer
+		TokenizerHeaders = []string{"Proxy-Tokenizer"}
+
+		tkz := NewTokenizer(openKey)
+		tkzServer := httptest.NewServer(tkz)
+		defer tkzServer.Close()
+
+		auth := "trustno1"
+		token := "supersecret"
+		secret, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth), ProcessorConfig: &InjectProcessorConfig{Token: token}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// Request with Proxy-Tokenizer header should work
+		client, err := Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+		assert.NoError(t, err)
+		req, err := http.NewRequest(http.MethodGet, appURL, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, &echoResponse{
+			Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", token)}},
+			Body:    "",
+		}, doEcho(t, client, req))
+	})
+
+	t.Run("custom headers with priority", func(t *testing.T) {
+		origHeaders := TokenizerHeaders
+		defer func() { TokenizerHeaders = origHeaders }()
+
+		// Configure multiple headers in priority order
+		TokenizerHeaders = []string{"X-Custom-Auth", "X-Api-Key", "Proxy-Tokenizer"}
+
+		tkz := NewTokenizer(openKey)
+		tkzServer := httptest.NewServer(tkz)
+		defer tkzServer.Close()
+
+		auth := "trustno1"
+		token := "supersecret"
+		secret, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth), ProcessorConfig: &InjectProcessorConfig{Token: token}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// Request with X-Custom-Auth header (highest priority) should work
+		client, err := Client(tkzServer.URL, WithAuth(auth), withHeaders(http.Header{
+			"X-Custom-Auth": {secret},
+		}))
+		assert.NoError(t, err)
+		req, err := http.NewRequest(http.MethodGet, appURL, nil)
+		assert.NoError(t, err)
+		resp := doEcho(t, client, req)
+		// Should inject the token as Authorization header
+		assert.Equal(t, fmt.Sprintf("Bearer %s", token), resp.Headers.Get("Authorization"))
+		// X-Custom-Auth is not filtered by default, so it passes through
+		assert.True(t, len(resp.Headers.Get("X-Custom-Auth")) > 0)
+
+		// Request with X-Api-Key header (second priority) should work
+		client, err = Client(tkzServer.URL, WithAuth(auth), withHeaders(http.Header{
+			"X-Api-Key": {secret},
+		}))
+		assert.NoError(t, err)
+		req, err = http.NewRequest(http.MethodGet, appURL, nil)
+		assert.NoError(t, err)
+		resp = doEcho(t, client, req)
+		assert.Equal(t, fmt.Sprintf("Bearer %s", token), resp.Headers.Get("Authorization"))
+		assert.True(t, len(resp.Headers.Get("X-Api-Key")) > 0)
+
+		// Request with Proxy-Tokenizer header (lowest priority) should work
+		client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+		assert.NoError(t, err)
+		req, err = http.NewRequest(http.MethodGet, appURL, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, &echoResponse{
+			Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", token)}},
+			Body:    "",
+		}, doEcho(t, client, req))
+	})
+
+	t.Run("first matching header takes precedence", func(t *testing.T) {
+		origHeaders := TokenizerHeaders
+		defer func() { TokenizerHeaders = origHeaders }()
+
+		// Configure multiple headers
+		TokenizerHeaders = []string{"X-Custom-Auth", "X-Api-Key"}
+
+		tkz := NewTokenizer(openKey)
+		tkzServer := httptest.NewServer(tkz)
+		defer tkzServer.Close()
+
+		auth1 := "auth1"
+		token1 := "token1"
+		secret1, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth1), ProcessorConfig: &InjectProcessorConfig{Token: token1}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		auth2 := "auth2"
+		token2 := "token2"
+		secret2, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth2), ProcessorConfig: &InjectProcessorConfig{Token: token2}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// When both headers are present, X-Custom-Auth takes precedence
+		client, err := Client(tkzServer.URL, WithAuth(auth1), withHeaders(http.Header{
+			"X-Custom-Auth": {secret1},
+			"X-Api-Key":     {secret2},
+		}))
+		assert.NoError(t, err)
+		req, err := http.NewRequest(http.MethodGet, appURL, nil)
+		assert.NoError(t, err)
+		// Should use token1 from X-Custom-Auth, not token2 from X-Api-Key
+		resp := doEcho(t, client, req)
+		assert.Equal(t, fmt.Sprintf("Bearer %s", token1), resp.Headers.Get("Authorization"))
+		// Both headers pass through (not filtered by default)
+		assert.True(t, len(resp.Headers.Get("X-Custom-Auth")) > 0)
+		assert.True(t, len(resp.Headers.Get("X-Api-Key")) > 0)
+	})
+}
