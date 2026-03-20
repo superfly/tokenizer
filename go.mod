@@ -16,6 +16,7 @@ require (
 require (
 	github.com/alecthomas/repr v0.4.0 // indirect
 	github.com/aws/smithy-go v1.20.3 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hexops/gotextdiff v1.0.3 // indirect
