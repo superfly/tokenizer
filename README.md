@@ -79,6 +79,88 @@ secret = {
 }
 ```
 
+### SigV4 processor
+
+The `sigv4_processor` re-signs AWS requests with SigV4 credentials. It parses the existing `Authorization` header to extract the service, region, and date, then re-signs the request with the sealed AWS credentials.
+
+```ruby
+secret = {
+    sigv4_processor: {
+        access_key: "AKIAIOSFODNN7EXAMPLE",
+        secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        no_swap: true
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    }
+}
+```
+
+Note: the `no_swap` field controls a bug-compatibility mode. When `false` (the default for backward compatibility), the region and service values extracted from the credential scope are swapped before re-signing. Set `no_swap: true` for correct behavior with new secrets.
+
+### JWT processor
+
+The `jwt_processor` handles Google Cloud service account authentication (and other OAuth2 JWT-bearer flows per [RFC 7523](https://tools.ietf.org/html/rfc7523)). It signs a JWT with the sealed RSA private key and exchanges it for a short-lived access token at the token endpoint.
+
+This processor is unique in two ways:
+1. **It transforms both the request and the response.** On the request side, it builds the JWT and constructs the token exchange POST body. On the response side, it intercepts the token endpoint's response, extracts the access token, seals it into a new `inject_processor` secret, and replaces the response body.
+2. **The caller never sees any plaintext credential.** The private key, the signed JWT, and the access token are all plaintext only inside tokenizer's process memory. The caller receives an opaque sealed blob.
+
+```ruby
+secret = {
+    jwt_processor: {
+        private_key: File.read("service-account-key.pem"),
+        email: "my-sa@my-project.iam.gserviceaccount.com",
+        scopes: "https://www.googleapis.com/auth/admin.directory.user",
+        token_url: "https://oauth2.googleapis.com/token",  # optional, this is the default
+        sub: "admin@example.com"                            # optional, for domain-wide delegation
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    },
+    allowed_hosts: ["oauth2.googleapis.com", "admin.googleapis.com"]
+}
+```
+
+**Usage is a two-step flow:**
+
+Step 1 - Exchange the sealed SA key for a sealed access token:
+
+```ruby
+# Send to the token endpoint through tokenizer
+resp = conn.post("http://oauth2.googleapis.com/token")
+sealed_access_token = JSON.parse(resp.body)["sealed_token"]
+expires_in = JSON.parse(resp.body)["expires_in"]
+```
+
+The response body is replaced with:
+```json
+{"sealed_token": "<base64 sealed InjectProcessor>", "expires_in": 3540, "token_type": "sealed"}
+```
+
+Step 2 - Use the sealed access token for API calls:
+
+```ruby
+conn2 = Faraday.new(
+    proxy: "http://tokenizer.flycast",
+    headers: {
+        proxy_tokenizer: "#{sealed_access_token}",
+        proxy_authorization: "Bearer trustno1"
+    }
+)
+
+conn2.get("http://admin.googleapis.com/admin/directory/v1/users")
+```
+
+The sealed access token is a normal `inject_processor` secret - tokenizer unseals it and injects the `Authorization: Bearer` header. When the token expires (typically after ~1 hour), repeat Step 1.
+
+The `sub` and `scopes` fields can be overridden at request time via parameters, allowing different requests through the same sealed credential to impersonate different users or request different scopes:
+
+```ruby
+processor_params = { sub: "other-admin@example.com", scopes: "https://www.googleapis.com/auth/gmail.readonly" }
+conn.headers[:proxy_tokenizer] = "#{Base64.encode64(sealed_secret)}; #{processor_params.to_json}"
+```
+
 ## Request-time parameters
 
 If the destination/formatting might vary between requests, `inject_processor` and `inject_hmac_processor` can specify an allowlist of `dst`/`fmt` parameters that the client can specify at request time. These parameters are supplied as JSON in the `Proxy-Tokenizer` header after the encrypted secret.
