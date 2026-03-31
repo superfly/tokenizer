@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -661,4 +662,119 @@ func flySrcVerifyKey(t *testing.T) ed25519.PublicKey {
 	t.Helper()
 	_ = flySrcSignKey(t)
 	return _flySrcVerifyKey
+}
+
+// TestJWTProcessorE2E exercises the full two-step JWT flow against real Google
+// APIs. Set GOOGLE_SA_KEY_FILE to the path of a service account JSON key file.
+func TestJWTProcessorE2E(t *testing.T) {
+	saKeyFile := os.Getenv("GOOGLE_SA_KEY_FILE")
+	if saKeyFile == "" {
+		t.Skip("GOOGLE_SA_KEY_FILE not set, skipping real-world JWT test")
+	}
+
+	// Read SA key file
+	saJSON, err := os.ReadFile(saKeyFile)
+	assert.NoError(t, err)
+
+	var saKey struct {
+		PrivateKey  string `json:"private_key"`
+		ClientEmail string `json:"client_email"`
+		TokenURI    string `json:"token_uri"`
+	}
+	assert.NoError(t, json.Unmarshal(saJSON, &saKey))
+
+	// Set up tokenizer
+	var (
+		pub, priv, _ = box.GenerateKey(rand.Reader)
+		sealKey      = hex.EncodeToString(pub[:])
+		openKey      = hex.EncodeToString(priv[:])
+	)
+
+	// Echo server for step 2 - verifies the Authorization header
+	echoServer := httptest.NewTLSServer(echo)
+	defer echoServer.Close()
+	UpstreamTrust.AddCert(echoServer.Certificate())
+
+	echoURL, err := url.Parse(echoServer.URL)
+	assert.NoError(t, err)
+	echoURL.Scheme = "http"
+	echoHost := echoURL.Host
+
+	tkz := NewTokenizer(openKey)
+	tkzServer := httptest.NewServer(tkz)
+	defer tkzServer.Close()
+
+	auth := "e2e-test-auth"
+
+	// Seal the real SA key into a JWTProcessorConfig
+	jwtCfg := &JWTProcessorConfig{
+		PrivateKey: []byte(saKey.PrivateKey),
+		Email:      saKey.ClientEmail,
+		Scopes:     "https://www.googleapis.com/auth/cloud-platform",
+	}
+
+	sealed, err := (&Secret{
+		AuthConfig:      NewBearerAuthConfig(auth),
+		ProcessorConfig: jwtCfg,
+		RequestValidators: []RequestValidator{
+			AllowHosts("oauth2.googleapis.com", echoHost),
+		},
+	}).Seal(sealKey)
+	assert.NoError(t, err)
+
+	// Step 1: Exchange sealed SA key for sealed access token
+	t.Log("Step 1: Exchanging JWT for access token via real Google endpoint...")
+	client, err := Client(tkzServer.URL, WithAuth(auth), WithSecret(sealed, nil))
+	assert.NoError(t, err)
+
+	tokenReq, err := http.NewRequest(http.MethodPost, "http://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	resp, err := client.Do(tokenReq)
+	assert.NoError(t, err)
+
+	respBody, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Step 1 failed: status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+
+	var sealedResp SealedTokenResponse
+	assert.NoError(t, json.Unmarshal(respBody, &sealedResp))
+
+	assert.Equal(t, "sealed", sealedResp.TokenType)
+	assert.True(t, sealedResp.ExpiresIn > 0)
+	assert.NotEqual(t, "", sealedResp.SealedToken)
+	t.Logf("Step 1 OK: got sealed token (expires_in=%d)", sealedResp.ExpiresIn)
+
+	// Step 2: Use sealed access token to hit the echo server
+	t.Log("Step 2: Using sealed access token via echo server...")
+	client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(sealedResp.SealedToken, nil))
+	assert.NoError(t, err)
+
+	apiReq, err := http.NewRequest(http.MethodGet, echoURL.String()+"/test", nil)
+	assert.NoError(t, err)
+
+	resp, err = client.Do(apiReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var echoResp echoResponse
+	assert.NoError(t, json.NewDecoder(resp.Body).Decode(&echoResp))
+	resp.Body.Close()
+
+	authHeader := echoResp.Headers.Get("Authorization")
+	assert.True(t, strings.HasPrefix(authHeader, "Bearer ya29."), "expected Google access token, got: %s", authHeader)
+	t.Logf("Step 2 OK: Authorization header injected (token prefix: %s...)", authHeader[:20])
+
+	// Step 2b: Verify sealed token fails without correct auth
+	t.Log("Step 2b: Verifying auth enforcement...")
+	client, err = Client(tkzServer.URL, WithAuth("wrong-password"), WithSecret(sealedResp.SealedToken, nil))
+	assert.NoError(t, err)
+	resp, err = client.Do(apiReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	t.Log("Step 2b OK: wrong auth correctly rejected")
 }

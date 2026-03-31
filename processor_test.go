@@ -3,6 +3,9 @@ package tokenizer
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -412,6 +415,26 @@ func generateTestRSAKey(t *testing.T) (*rsa.PrivateKey, []byte) {
 	return key, pemBytes
 }
 
+func generateTestECKey(t *testing.T) (*ecdsa.PrivateKey, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	assert.NoError(t, err)
+	der, err := x509.MarshalECPrivateKey(key)
+	assert.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return key, pemBytes
+}
+
+func generateTestEd25519Key(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, []byte) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	assert.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	assert.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	return pub, priv, pemBytes
+}
+
 func generateTestSealKey(t *testing.T) (sealKey string, pub *[32]byte, priv *[32]byte) {
 	t.Helper()
 	pub, priv, err := box.GenerateKey(rand.Reader)
@@ -638,6 +661,88 @@ func TestJWTProcessorConfig_Processor_DefaultTokenURL(t *testing.T) {
 	claims := token.Claims.(jwt.MapClaims)
 	// Default token URL should be used as the aud claim
 	assert.Equal(t, defaultTokenURL, claims["aud"])
+}
+
+func TestJWTProcessorConfig_Processor_ECDSAKey(t *testing.T) {
+	ecKey, pemBytes := generateTestECKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+	assert.NotEqual(t, "", assertion)
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		assert.Equal(t, "ES256", token.Method.Alg())
+		return &ecKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, token.Valid)
+
+	claims := token.Claims.(jwt.MapClaims)
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", claims["iss"])
+}
+
+func TestJWTProcessorConfig_Processor_Ed25519Key(t *testing.T) {
+	pubKey, _, pemBytes := generateTestEd25519Key(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+	assert.NotEqual(t, "", assertion)
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		assert.Equal(t, "EdDSA", token.Method.Alg())
+		return pubKey, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, token.Valid)
+
+	claims := token.Claims.(jwt.MapClaims)
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", claims["iss"])
 }
 
 func TestJWTProcessorConfig_StripHazmat(t *testing.T) {

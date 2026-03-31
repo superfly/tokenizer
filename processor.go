@@ -3,6 +3,9 @@ package tokenizer
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rsa"
 	_ "crypto/sha256"
@@ -76,7 +79,7 @@ type SealingContext struct {
 }
 
 type ProcessorConfig interface {
-	Processor(params map[string]string, ctx *SealingContext) (RequestProcessor, error)
+	Processor(params map[string]string, sctx *SealingContext) (RequestProcessor, error)
 	StripHazmat() ProcessorConfig
 }
 
@@ -84,7 +87,7 @@ type ProcessorConfig interface {
 // need to transform the HTTP response. The JWT processor uses this to replace
 // Google's token response with a sealed access token.
 type ResponseProcessorConfig interface {
-	ResponseProcessor(params map[string]string, ctx *SealingContext) (func(*http.Response) error, error)
+	ResponseProcessor(params map[string]string, sctx *SealingContext) (func(*http.Response) error, error)
 }
 
 type wireProcessor struct {
@@ -528,12 +531,16 @@ func (c *Sigv4ProcessorConfig) StripHazmat() ProcessorConfig {
 
 const defaultTokenURL = "https://oauth2.googleapis.com/token"
 
-// JWTProcessorConfig signs a JWT using an RSA private key and constructs a
-// token exchange request body. This processor also transforms the response:
-// it intercepts the token endpoint's response, extracts the access token,
-// seals it into a new InjectProcessorConfig secret, and replaces the response
-// body with the sealed token. This keeps tokenizer completely stateless while
-// ensuring the caller never sees any plaintext credential.
+// JWTProcessorConfig signs a JWT using a private key and constructs a token
+// exchange request body. Supported key types: RSA (RS256), ECDSA (ES256,
+// ES384, ES512), and Ed25519 (EdDSA). The signing algorithm is chosen
+// automatically based on the key type.
+//
+// This processor also transforms the response: it intercepts the token
+// endpoint's response, extracts the access token, seals it into a new
+// InjectProcessorConfig secret, and replaces the response body with the sealed
+// token. This keeps tokenizer completely stateless while ensuring the caller
+// never sees any plaintext credential.
 //
 // The outbound token exchange happens as a normal proxied request - the caller
 // sends the request to the token endpoint through tokenizer, and this processor
@@ -545,7 +552,7 @@ const defaultTokenURL = "https://oauth2.googleapis.com/token"
 // exchange internally. The alternative (returning the plaintext access token
 // to the caller) was rejected because the token could be exfiltrated.
 type JWTProcessorConfig struct {
-	PrivateKey []byte `json:"private_key"` // PEM-encoded RSA private key
+	PrivateKey []byte `json:"private_key"` // PEM-encoded private key (RSA, EC, or Ed25519)
 	Email      string `json:"email"`       // Service account email (JWT "iss")
 	Subject    string `json:"sub"`         // User to impersonate (domain-wide delegation)
 	Scopes     string `json:"scopes"`      // Space-separated OAuth2 scopes
@@ -565,7 +572,9 @@ type SealedTokenResponse struct {
 var _ ProcessorConfig = (*JWTProcessorConfig)(nil)
 var _ ResponseProcessorConfig = (*JWTProcessorConfig)(nil)
 
-func (c *JWTProcessorConfig) parseKey() (*rsa.PrivateKey, error) {
+// parseKey decodes a PEM-encoded private key and returns it as a
+// crypto.Signer. Supports RSA (PKCS1 and PKCS8), ECDSA, and Ed25519 keys.
+func (c *JWTProcessorConfig) parseKey() (crypto.Signer, error) {
 	if len(c.PrivateKey) == 0 {
 		return nil, errors.New("missing private key")
 	}
@@ -575,21 +584,49 @@ func (c *JWTProcessorConfig) parseKey() (*rsa.PrivateKey, error) {
 		return nil, errors.New("invalid PEM-encoded private key")
 	}
 
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		// Try PKCS8 as a fallback (Google sometimes uses this format)
-		pkcs8Key, pkcs8Err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if pkcs8Err != nil {
-			return nil, fmt.Errorf("invalid private key: %w", err)
-		}
-		var ok bool
-		key, ok = pkcs8Key.(*rsa.PrivateKey)
-		if !ok {
-			return nil, errors.New("private key is not RSA")
-		}
+	// Try PKCS1 (RSA-only format) first
+	if rsaKey, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return rsaKey, nil
 	}
 
-	return key, nil
+	// Try PKCS8 (supports RSA, ECDSA, Ed25519)
+	pkcs8Key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		// Try EC-specific format as last resort
+		if ecKey, ecErr := x509.ParseECPrivateKey(block.Bytes); ecErr == nil {
+			return ecKey, nil
+		}
+		return nil, fmt.Errorf("unsupported private key format: %w", err)
+	}
+
+	signer, ok := pkcs8Key.(crypto.Signer)
+	if !ok {
+		return nil, errors.New("private key does not implement crypto.Signer")
+	}
+	return signer, nil
+}
+
+// signingMethod returns the JWT signing method appropriate for the given key.
+func signingMethod(key crypto.Signer) (jwt.SigningMethod, error) {
+	switch k := key.(type) {
+	case *rsa.PrivateKey:
+		return jwt.SigningMethodRS256, nil
+	case *ecdsa.PrivateKey:
+		switch k.Curve {
+		case elliptic.P256():
+			return jwt.SigningMethodES256, nil
+		case elliptic.P384():
+			return jwt.SigningMethodES384, nil
+		case elliptic.P521():
+			return jwt.SigningMethodES512, nil
+		default:
+			return nil, fmt.Errorf("unsupported EC curve: %v", k.Curve.Params().Name)
+		}
+	case ed25519.PrivateKey:
+		return jwt.SigningMethodEdDSA, nil
+	default:
+		return nil, fmt.Errorf("unsupported key type: %T", key)
+	}
 }
 
 func (c *JWTProcessorConfig) tokenURL() string {
@@ -600,7 +637,12 @@ func (c *JWTProcessorConfig) tokenURL() string {
 }
 
 func (c *JWTProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
-	rsaKey, err := c.parseKey()
+	key, err := c.parseKey()
+	if err != nil {
+		return nil, err
+	}
+
+	method, err := signingMethod(key)
 	if err != nil {
 		return nil, err
 	}
@@ -636,8 +678,8 @@ func (c *JWTProcessorConfig) Processor(params map[string]string, _ *SealingConte
 			claims["sub"] = subject
 		}
 
-		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-		signedJWT, err := token.SignedString(rsaKey)
+		token := jwt.NewWithClaims(method, claims)
+		signedJWT, err := token.SignedString(key)
 		if err != nil {
 			return fmt.Errorf("failed to sign JWT: %w", err)
 		}
@@ -656,8 +698,8 @@ func (c *JWTProcessorConfig) Processor(params map[string]string, _ *SealingConte
 	}, nil
 }
 
-func (c *JWTProcessorConfig) ResponseProcessor(params map[string]string, ctx *SealingContext) (func(*http.Response) error, error) {
-	if ctx == nil {
+func (c *JWTProcessorConfig) ResponseProcessor(params map[string]string, sctx *SealingContext) (func(*http.Response) error, error) {
+	if sctx == nil {
 		return nil, errors.New("JWT response processor requires a sealing context")
 	}
 
@@ -689,12 +731,12 @@ func (c *JWTProcessorConfig) ResponseProcessor(params map[string]string, ctx *Se
 		// Create a new Secret with InjectProcessorConfig, forwarding auth
 		// and validators from the original secret
 		newSecret := &Secret{
-			AuthConfig:        ctx.AuthConfig,
+			AuthConfig:        sctx.AuthConfig,
 			ProcessorConfig:   &InjectProcessorConfig{Token: tokenResp.AccessToken},
-			RequestValidators: ctx.RequestValidators,
+			RequestValidators: sctx.RequestValidators,
 		}
 
-		sealedToken, err := newSecret.sealRaw(ctx.SealKey)
+		sealedToken, err := newSecret.sealRaw(sctx.SealKey)
 		if err != nil {
 			return fmt.Errorf("failed to seal access token: %w", err)
 		}
@@ -738,10 +780,10 @@ type MultiProcessorConfig []ProcessorConfig
 
 var _ ProcessorConfig = new(MultiProcessorConfig)
 
-func (c MultiProcessorConfig) Processor(params map[string]string, ctx *SealingContext) (RequestProcessor, error) {
+func (c MultiProcessorConfig) Processor(params map[string]string, sctx *SealingContext) (RequestProcessor, error) {
 	var processors []RequestProcessor
 	for _, cfg := range c {
-		proc, err := cfg.Processor(params, ctx)
+		proc, err := cfg.Processor(params, sctx)
 		if err != nil {
 			return nil, err
 		}

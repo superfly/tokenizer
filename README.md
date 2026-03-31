@@ -100,7 +100,7 @@ Note: the `no_swap` field controls a bug-compatibility mode. When `false` (the d
 
 ### JWT processor
 
-The `jwt_processor` handles Google Cloud service account authentication (and other OAuth2 JWT-bearer flows per [RFC 7523](https://tools.ietf.org/html/rfc7523)). It signs a JWT with the sealed RSA private key and exchanges it for a short-lived access token at the token endpoint.
+The `jwt_processor` handles Google Cloud service account authentication (and other OAuth2 JWT-bearer flows per [RFC 7523](https://tools.ietf.org/html/rfc7523)). It signs a JWT with the sealed private key and exchanges it for a short-lived access token at the token endpoint. RSA (RS256), ECDSA (ES256/ES384/ES512), and Ed25519 (EdDSA) keys are supported - the signing algorithm is chosen automatically based on the key type.
 
 This processor is unique in two ways:
 1. **It transforms both the request and the response.** On the request side, it builds the JWT and constructs the token exchange POST body. On the response side, it intercepts the token endpoint's response, extracts the access token, seals it into a new `inject_processor` secret, and replaces the response body.
@@ -160,6 +160,8 @@ The `sub` and `scopes` fields can be overridden at request time via parameters, 
 processor_params = { sub: "other-admin@example.com", scopes: "https://www.googleapis.com/auth/gmail.readonly" }
 conn.headers[:proxy_tokenizer] = "#{Base64.encode64(sealed_secret)}; #{processor_params.to_json}"
 ```
+
+**Fly.io deployment note:** For internal use on Fly.io, consider using `fly-src` auth instead of `bearer_auth`. This ties the sealed secret to a specific Fly machine, so the token is not useful if exfiltrated outside the originating instance.
 
 ## Request-time parameters
 
