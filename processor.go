@@ -3,19 +3,27 @@ package tokenizer
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rsa"
 	_ "crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/icholy/replace"
 	"golang.org/x/exp/slices"
 )
@@ -42,6 +50,16 @@ const (
 	// ParamPlaceholder specifies the placeholder pattern to replace in the
 	// request body with the token value. Used by InjectBodyProcessor.
 	ParamPlaceholder = "placeholder"
+
+	// ParamSubject optionally specifies the subject (user to impersonate)
+	// for JWTProcessor. Allows different requests through the same sealed
+	// credential to impersonate different users.
+	ParamSubject = "sub"
+
+	// ParamScopes optionally specifies the OAuth2 scopes for JWTProcessor.
+	// Allows different requests through the same sealed credential to
+	// request different scopes.
+	ParamScopes = "scopes"
 )
 
 const (
@@ -51,9 +69,25 @@ const (
 
 type RequestProcessor func(r *http.Request) error
 
+// SealingContext provides the information a processor needs to create new
+// sealed secrets. Only JWTProcessorConfig uses this today - it seals the
+// access token into a new InjectProcessorConfig for the caller to reuse.
+type SealingContext struct {
+	AuthConfig        AuthConfig
+	RequestValidators []RequestValidator
+	SealKey           *[32]byte
+}
+
 type ProcessorConfig interface {
-	Processor(map[string]string) (RequestProcessor, error)
+	Processor(params map[string]string, sctx *SealingContext) (RequestProcessor, error)
 	StripHazmat() ProcessorConfig
+}
+
+// ResponseProcessorConfig is an optional interface for processors that also
+// need to transform the HTTP response. The JWT processor uses this to replace
+// Google's token response with a sealed access token.
+type ResponseProcessorConfig interface {
+	ResponseProcessor(params map[string]string, sctx *SealingContext) (func(*http.Response) error, error)
 }
 
 type wireProcessor struct {
@@ -63,6 +97,7 @@ type wireProcessor struct {
 	OAuthProcessorConfig      *OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
 	OAuthBodyProcessorConfig  *OAuthBodyProcessorConfig  `json:"oauth2_body_processor,omitempty"`
 	Sigv4ProcessorConfig      *Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
+	JWTProcessorConfig        *JWTProcessorConfig        `json:"jwt_processor,omitempty"`
 	MultiProcessorConfig      *MultiProcessorConfig      `json:"multi_processor,omitempty"`
 }
 
@@ -80,6 +115,8 @@ func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
 		return wireProcessor{OAuthBodyProcessorConfig: p}, nil
 	case *Sigv4ProcessorConfig:
 		return wireProcessor{Sigv4ProcessorConfig: p}, nil
+	case *JWTProcessorConfig:
+		return wireProcessor{JWTProcessorConfig: p}, nil
 	case *MultiProcessorConfig:
 		return wireProcessor{MultiProcessorConfig: p}, nil
 	default:
@@ -115,6 +152,10 @@ func (wp *wireProcessor) getProcessorConfig() (ProcessorConfig, error) {
 		np += 1
 		p = wp.Sigv4ProcessorConfig
 	}
+	if wp.JWTProcessorConfig != nil {
+		np += 1
+		p = wp.JWTProcessorConfig
+	}
 	if wp.MultiProcessorConfig != nil {
 		np += 1
 		p = wp.MultiProcessorConfig
@@ -134,7 +175,7 @@ type InjectProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectProcessorConfig)
 
-func (c *InjectProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *InjectProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
 	if c.Token == "" {
 		return nil, errors.New("missing token")
 	}
@@ -167,7 +208,7 @@ type InjectHMACProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectHMACProcessorConfig)
 
-func (c *InjectHMACProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *InjectHMACProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
 	var h crypto.Hash
 	switch c.Hash {
 	case "sha256":
@@ -224,7 +265,7 @@ type InjectBodyProcessorConfig struct {
 
 var _ ProcessorConfig = new(InjectBodyProcessorConfig)
 
-func (c *InjectBodyProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *InjectBodyProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
 	if c.Token == "" {
 		return nil, errors.New("missing token")
 	}
@@ -273,7 +314,7 @@ type OAuthToken struct {
 
 var _ ProcessorConfig = (*OAuthProcessorConfig)(nil)
 
-func (c *OAuthProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *OAuthProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
 	token := c.Token.AccessToken
 	if params[ParamSubtoken] == SubtokenRefresh {
 		token = c.Token.RefreshToken
@@ -326,7 +367,7 @@ type OAuthBodyProcessorConfig struct {
 
 var _ ProcessorConfig = (*OAuthBodyProcessorConfig)(nil)
 
-func (c *OAuthBodyProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *OAuthBodyProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
 	token := c.Token.AccessToken
 	if params[ParamSubtoken] == SubtokenRefresh {
 		token = c.Token.RefreshToken
@@ -380,7 +421,7 @@ type Sigv4ProcessorConfig struct {
 
 var _ ProcessorConfig = (*Sigv4ProcessorConfig)(nil)
 
-func (c *Sigv4ProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c *Sigv4ProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
 
 	if len(c.AccessKey) == 0 {
 		return nil, errors.New("missing access key")
@@ -488,14 +529,261 @@ func (c *Sigv4ProcessorConfig) StripHazmat() ProcessorConfig {
 	}
 }
 
+const defaultTokenURL = "https://oauth2.googleapis.com/token"
+
+// JWTProcessorConfig signs a JWT using a private key and constructs a token
+// exchange request body. Supported key types: RSA (RS256), ECDSA (ES256,
+// ES384, ES512), and Ed25519 (EdDSA). The signing algorithm is chosen
+// automatically based on the key type.
+//
+// This processor also transforms the response: it intercepts the token
+// endpoint's response, extracts the access token, seals it into a new
+// InjectProcessorConfig secret, and replaces the response body with the sealed
+// token. This keeps tokenizer completely stateless while ensuring the caller
+// never sees any plaintext credential.
+//
+// The outbound token exchange happens as a normal proxied request - the caller
+// sends the request to the token endpoint through tokenizer, and this processor
+// builds the POST body (grant_type + signed JWT assertion). The response
+// rewriting is the only side effect.
+//
+// This design follows the industry-standard pattern used by HashiCorp Vault
+// and AWS IAM Roles Anywhere, where the proxy performs the full credential
+// exchange internally. The alternative (returning the plaintext access token
+// to the caller) was rejected because the token could be exfiltrated.
+type JWTProcessorConfig struct {
+	PrivateKey []byte `json:"private_key"` // PEM-encoded private key (RSA, EC, or Ed25519)
+	Email      string `json:"email"`       // Service account email (JWT "iss")
+	Subject    string `json:"sub"`         // User to impersonate (domain-wide delegation)
+	Scopes     string `json:"scopes"`      // Space-separated OAuth2 scopes
+	TokenURL   string `json:"token_url"`   // Token endpoint (default: Google's)
+}
+
+// SealedTokenResponse is the response body returned to the caller after a
+// successful JWT token exchange. The sealed_token field is an opaque encrypted
+// blob containing an InjectProcessorConfig that the caller can use for
+// subsequent API requests through tokenizer.
+type SealedTokenResponse struct {
+	SealedToken string `json:"sealed_token"`
+	ExpiresIn   int    `json:"expires_in"`
+	TokenType   string `json:"token_type"`
+}
+
+var _ ProcessorConfig = (*JWTProcessorConfig)(nil)
+var _ ResponseProcessorConfig = (*JWTProcessorConfig)(nil)
+
+// parseKey decodes a PEM-encoded private key and returns it as a
+// crypto.Signer. Supports RSA (PKCS1 and PKCS8), ECDSA, and Ed25519 keys.
+func (c *JWTProcessorConfig) parseKey() (crypto.Signer, error) {
+	if len(c.PrivateKey) == 0 {
+		return nil, errors.New("missing private key")
+	}
+
+	block, _ := pem.Decode(c.PrivateKey)
+	if block == nil {
+		return nil, errors.New("invalid PEM-encoded private key")
+	}
+
+	// Try PKCS1 (RSA-only format) first
+	if rsaKey, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return rsaKey, nil
+	}
+
+	// Try PKCS8 (supports RSA, ECDSA, Ed25519)
+	pkcs8Key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		// Try EC-specific format as last resort
+		if ecKey, ecErr := x509.ParseECPrivateKey(block.Bytes); ecErr == nil {
+			return ecKey, nil
+		}
+		return nil, fmt.Errorf("unsupported private key format: %w", err)
+	}
+
+	signer, ok := pkcs8Key.(crypto.Signer)
+	if !ok {
+		return nil, errors.New("private key does not implement crypto.Signer")
+	}
+	return signer, nil
+}
+
+// signingMethod returns the JWT signing method appropriate for the given key.
+func signingMethod(key crypto.Signer) (jwt.SigningMethod, error) {
+	switch k := key.(type) {
+	case *rsa.PrivateKey:
+		return jwt.SigningMethodRS256, nil
+	case *ecdsa.PrivateKey:
+		switch k.Curve {
+		case elliptic.P256():
+			return jwt.SigningMethodES256, nil
+		case elliptic.P384():
+			return jwt.SigningMethodES384, nil
+		case elliptic.P521():
+			return jwt.SigningMethodES512, nil
+		default:
+			return nil, fmt.Errorf("unsupported EC curve: %v", k.Curve.Params().Name)
+		}
+	case ed25519.PrivateKey:
+		return jwt.SigningMethodEdDSA, nil
+	default:
+		return nil, fmt.Errorf("unsupported key type: %T", key)
+	}
+}
+
+func (c *JWTProcessorConfig) tokenURL() string {
+	if c.TokenURL != "" {
+		return c.TokenURL
+	}
+	return defaultTokenURL
+}
+
+func (c *JWTProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
+	key, err := c.parseKey()
+	if err != nil {
+		return nil, err
+	}
+
+	method, err := signingMethod(key)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.Email == "" {
+		return nil, errors.New("missing email")
+	}
+
+	// Resolve subject and scopes, allowing param overrides
+	subject := c.Subject
+	if s, ok := params[ParamSubject]; ok {
+		subject = s
+	}
+
+	scopes := c.Scopes
+	if s, ok := params[ParamScopes]; ok {
+		scopes = s
+	}
+
+	tokenURL := c.tokenURL()
+
+	return func(r *http.Request) error {
+		now := time.Now()
+
+		claims := jwt.MapClaims{
+			"iss":   c.Email,
+			"scope": scopes,
+			"aud":   tokenURL,
+			"iat":   now.Unix(),
+			"exp":   now.Add(time.Hour).Unix(),
+		}
+		if subject != "" {
+			claims["sub"] = subject
+		}
+
+		token := jwt.NewWithClaims(method, claims)
+		signedJWT, err := token.SignedString(key)
+		if err != nil {
+			return fmt.Errorf("failed to sign JWT: %w", err)
+		}
+
+		// Build the token exchange POST body
+		body := url.Values{
+			"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+			"assertion":  {signedJWT},
+		}.Encode()
+
+		r.Body = io.NopCloser(strings.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		return nil
+	}, nil
+}
+
+func (c *JWTProcessorConfig) ResponseProcessor(params map[string]string, sctx *SealingContext) (func(*http.Response) error, error) {
+	if sctx == nil {
+		return nil, errors.New("JWT response processor requires a sealing context")
+	}
+
+	return func(resp *http.Response) error {
+		// Pass through non-OK responses without modification
+		if resp.StatusCode != http.StatusOK {
+			return nil
+		}
+
+		// Parse Google's token response
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read token response: %w", err)
+		}
+
+		var tokenResp struct {
+			AccessToken string `json:"access_token"`
+			ExpiresIn   int    `json:"expires_in"`
+			TokenType   string `json:"token_type"`
+		}
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			return fmt.Errorf("failed to parse token response: %w", err)
+		}
+
+		if tokenResp.AccessToken == "" {
+			return errors.New("token response missing access_token")
+		}
+
+		// Create a new Secret with InjectProcessorConfig, forwarding auth
+		// and validators from the original secret
+		newSecret := &Secret{
+			AuthConfig:        sctx.AuthConfig,
+			ProcessorConfig:   &InjectProcessorConfig{Token: tokenResp.AccessToken},
+			RequestValidators: sctx.RequestValidators,
+		}
+
+		sealedToken, err := newSecret.sealRaw(sctx.SealKey)
+		if err != nil {
+			return fmt.Errorf("failed to seal access token: %w", err)
+		}
+
+		// Subtract a small buffer from expires_in to account for clock skew
+		expiresIn := tokenResp.ExpiresIn
+		if expiresIn > 60 {
+			expiresIn -= 60
+		}
+
+		sealedResp := SealedTokenResponse{
+			SealedToken: sealedToken,
+			ExpiresIn:   expiresIn,
+			TokenType:   "sealed",
+		}
+
+		respJSON, err := json.Marshal(sealedResp)
+		if err != nil {
+			return fmt.Errorf("failed to marshal sealed response: %w", err)
+		}
+
+		resp.Body = io.NopCloser(bytes.NewReader(respJSON))
+		resp.ContentLength = int64(len(respJSON))
+		resp.Header.Set("Content-Type", "application/json")
+
+		return nil
+	}, nil
+}
+
+func (c *JWTProcessorConfig) StripHazmat() ProcessorConfig {
+	return &JWTProcessorConfig{
+		PrivateKey: redactedBase64,
+		Email:      c.Email,
+		Subject:    c.Subject,
+		Scopes:     c.Scopes,
+		TokenURL:   c.TokenURL,
+	}
+}
+
 type MultiProcessorConfig []ProcessorConfig
 
 var _ ProcessorConfig = new(MultiProcessorConfig)
 
-func (c MultiProcessorConfig) Processor(params map[string]string) (RequestProcessor, error) {
+func (c MultiProcessorConfig) Processor(params map[string]string, sctx *SealingContext) (RequestProcessor, error) {
 	var processors []RequestProcessor
 	for _, cfg := range c {
-		proc, err := cfg.Processor(params)
+		proc, err := cfg.Processor(params, sctx)
 		if err != nil {
 			return nil, err
 		}

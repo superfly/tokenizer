@@ -6,16 +6,21 @@ import (
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -458,6 +463,94 @@ func TestTokenizer(t *testing.T) {
 		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	})
 
+	t.Run("jwt processor", func(t *testing.T) {
+		// Mock Google token endpoint that returns an access token
+		tokenEndpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "bad body", 500)
+				return
+			}
+			bodyStr := string(body)
+			if !strings.Contains(bodyStr, "grant_type=") || !strings.Contains(bodyStr, "assertion=") {
+				http.Error(w, "missing grant_type or assertion", 400)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "ya29.test-access-token-from-google",
+				"expires_in":   3600,
+				"token_type":   "Bearer",
+			})
+		}))
+		defer tokenEndpoint.Close()
+
+		// Trust the mock token endpoint's certificate
+		UpstreamTrust.AddCert(tokenEndpoint.Certificate())
+
+		tokenEndpointURL, err := url.Parse(tokenEndpoint.URL)
+		assert.NoError(t, err)
+		tokenEndpointURL.Scheme = "http" // tokenizer upgrades to TLS
+		tokenHost := tokenEndpointURL.Host
+
+		// Generate RSA key for JWT signing
+		rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		assert.NoError(t, err)
+		pemBytes := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(rsaKey),
+		})
+
+		auth := "jwt-auth-secret"
+		jwtCfg := &JWTProcessorConfig{
+			PrivateKey: pemBytes,
+			Email:      "test-sa@my-project.iam.gserviceaccount.com",
+			Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+			TokenURL:   tokenEndpointURL.String(),
+		}
+
+		// Seal with allowed_hosts covering both token endpoint and API
+		secret, err := (&Secret{
+			AuthConfig:        NewBearerAuthConfig(auth),
+			ProcessorConfig:   jwtCfg,
+			RequestValidators: []RequestValidator{AllowHosts(tokenHost, appHost)},
+		}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		// Step 1: Exchange - send to token endpoint through tokenizer
+		client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+		assert.NoError(t, err)
+
+		tokenReq, err := http.NewRequest(http.MethodPost, tokenEndpointURL.String(), nil)
+		assert.NoError(t, err)
+
+		resp, err = client.Do(tokenReq)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Parse the sealed token response
+		var sealedResp SealedTokenResponse
+		assert.NoError(t, json.NewDecoder(resp.Body).Decode(&sealedResp))
+		assert.Equal(t, "sealed", sealedResp.TokenType)
+		assert.True(t, sealedResp.ExpiresIn > 0)
+		assert.NotEqual(t, "", sealedResp.SealedToken)
+
+		// Step 2: Use the sealed access token to hit the app API
+		client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(sealedResp.SealedToken, nil))
+		assert.NoError(t, err)
+		assert.Equal(t, &echoResponse{
+			Headers: http.Header{"Authorization": {"Bearer ya29.test-access-token-from-google"}},
+			Body:    "",
+		}, doEcho(t, client, req))
+
+		// Step 2b: Sealed token should fail without correct auth
+		client, err = Client(tkzServer.URL, WithAuth("wrong-password"), WithSecret(sealedResp.SealedToken, nil))
+		assert.NoError(t, err)
+		resp, err = client.Do(req)
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	})
+
 	t.Run("MultiProcessor", func(t *testing.T) {
 		auth := "trustno1"
 		token1 := "supersecret"
@@ -569,4 +662,119 @@ func flySrcVerifyKey(t *testing.T) ed25519.PublicKey {
 	t.Helper()
 	_ = flySrcSignKey(t)
 	return _flySrcVerifyKey
+}
+
+// TestJWTProcessorE2E exercises the full two-step JWT flow against real Google
+// APIs. Set GOOGLE_SA_KEY_FILE to the path of a service account JSON key file.
+func TestJWTProcessorE2E(t *testing.T) {
+	saKeyFile := os.Getenv("GOOGLE_SA_KEY_FILE")
+	if saKeyFile == "" {
+		t.Skip("GOOGLE_SA_KEY_FILE not set, skipping real-world JWT test")
+	}
+
+	// Read SA key file
+	saJSON, err := os.ReadFile(saKeyFile)
+	assert.NoError(t, err)
+
+	var saKey struct {
+		PrivateKey  string `json:"private_key"`
+		ClientEmail string `json:"client_email"`
+		TokenURI    string `json:"token_uri"`
+	}
+	assert.NoError(t, json.Unmarshal(saJSON, &saKey))
+
+	// Set up tokenizer
+	var (
+		pub, priv, _ = box.GenerateKey(rand.Reader)
+		sealKey      = hex.EncodeToString(pub[:])
+		openKey      = hex.EncodeToString(priv[:])
+	)
+
+	// Echo server for step 2 - verifies the Authorization header
+	echoServer := httptest.NewTLSServer(echo)
+	defer echoServer.Close()
+	UpstreamTrust.AddCert(echoServer.Certificate())
+
+	echoURL, err := url.Parse(echoServer.URL)
+	assert.NoError(t, err)
+	echoURL.Scheme = "http"
+	echoHost := echoURL.Host
+
+	tkz := NewTokenizer(openKey)
+	tkzServer := httptest.NewServer(tkz)
+	defer tkzServer.Close()
+
+	auth := "e2e-test-auth"
+
+	// Seal the real SA key into a JWTProcessorConfig
+	jwtCfg := &JWTProcessorConfig{
+		PrivateKey: []byte(saKey.PrivateKey),
+		Email:      saKey.ClientEmail,
+		Scopes:     "https://www.googleapis.com/auth/cloud-platform",
+	}
+
+	sealed, err := (&Secret{
+		AuthConfig:      NewBearerAuthConfig(auth),
+		ProcessorConfig: jwtCfg,
+		RequestValidators: []RequestValidator{
+			AllowHosts("oauth2.googleapis.com", echoHost),
+		},
+	}).Seal(sealKey)
+	assert.NoError(t, err)
+
+	// Step 1: Exchange sealed SA key for sealed access token
+	t.Log("Step 1: Exchanging JWT for access token via real Google endpoint...")
+	client, err := Client(tkzServer.URL, WithAuth(auth), WithSecret(sealed, nil))
+	assert.NoError(t, err)
+
+	tokenReq, err := http.NewRequest(http.MethodPost, "http://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	resp, err := client.Do(tokenReq)
+	assert.NoError(t, err)
+
+	respBody, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Step 1 failed: status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+
+	var sealedResp SealedTokenResponse
+	assert.NoError(t, json.Unmarshal(respBody, &sealedResp))
+
+	assert.Equal(t, "sealed", sealedResp.TokenType)
+	assert.True(t, sealedResp.ExpiresIn > 0)
+	assert.NotEqual(t, "", sealedResp.SealedToken)
+	t.Logf("Step 1 OK: got sealed token (expires_in=%d)", sealedResp.ExpiresIn)
+
+	// Step 2: Use sealed access token to hit the echo server
+	t.Log("Step 2: Using sealed access token via echo server...")
+	client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(sealedResp.SealedToken, nil))
+	assert.NoError(t, err)
+
+	apiReq, err := http.NewRequest(http.MethodGet, echoURL.String()+"/test", nil)
+	assert.NoError(t, err)
+
+	resp, err = client.Do(apiReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var echoResp echoResponse
+	assert.NoError(t, json.NewDecoder(resp.Body).Decode(&echoResp))
+	resp.Body.Close()
+
+	authHeader := echoResp.Headers.Get("Authorization")
+	assert.True(t, strings.HasPrefix(authHeader, "Bearer ya29."), "expected Google access token, got: %s", authHeader)
+	t.Logf("Step 2 OK: Authorization header injected (token prefix: %s...)", authHeader[:20])
+
+	// Step 2b: Verify sealed token fails without correct auth
+	t.Log("Step 2b: Verifying auth enforcement...")
+	client, err = Client(tkzServer.URL, WithAuth("wrong-password"), WithSecret(sealedResp.SealedToken, nil))
+	assert.NoError(t, err)
+	resp, err = client.Do(apiReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
+	t.Log("Step 2b OK: wrong auth correctly rejected")
 }

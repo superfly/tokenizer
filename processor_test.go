@@ -3,12 +3,26 @@ package tokenizer
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/assert/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/nacl/box"
 )
 
 func TestFmtProcessor(t *testing.T) {
@@ -174,7 +188,7 @@ func TestInjectBodyProcessorConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proc, err := tt.config.Processor(tt.params)
+			proc, err := tt.config.Processor(tt.params, nil)
 			assert.NoError(t, err)
 
 			req := &http.Request{
@@ -245,7 +259,7 @@ func TestOAuthProcessorConfigBodyInjection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proc, err := tt.config.Processor(tt.params)
+			proc, err := tt.config.Processor(tt.params, nil)
 			assert.NoError(t, err)
 
 			req := &http.Request{
@@ -358,7 +372,7 @@ func TestOAuthBodyProcessorConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proc, err := tt.config.Processor(tt.params)
+			proc, err := tt.config.Processor(tt.params, nil)
 			assert.NoError(t, err)
 
 			req := &http.Request{
@@ -388,6 +402,542 @@ func TestOAuthBodyProcessorConfig(t *testing.T) {
 // Helper function to convert string to io.ReadCloser
 func stringToReadCloser(s string) io.ReadCloser {
 	return io.NopCloser(strings.NewReader(s))
+}
+
+func generateTestRSAKey(t *testing.T) (*rsa.PrivateKey, []byte) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	return key, pemBytes
+}
+
+func generateTestECKey(t *testing.T) (*ecdsa.PrivateKey, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	assert.NoError(t, err)
+	der, err := x509.MarshalECPrivateKey(key)
+	assert.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return key, pemBytes
+}
+
+func generateTestEd25519Key(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, []byte) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	assert.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	assert.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	return pub, priv, pemBytes
+}
+
+func generateTestSealKey(t *testing.T) (sealKey string, pub *[32]byte, priv *[32]byte) {
+	t.Helper()
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	assert.NoError(t, err)
+	return hex.EncodeToString(pub[:]), pub, priv
+}
+
+func TestJWTProcessorConfig_Processor_BuildsValidJWT(t *testing.T) {
+	rsaKey, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	// Verify Content-Type is set
+	assert.Equal(t, "application/x-www-form-urlencoded", req.Header.Get("Content-Type"))
+
+	// Read the body and parse the form
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	bodyStr := string(body)
+
+	// Verify grant_type
+	assert.Contains(t, bodyStr, "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer")
+
+	// Extract the assertion parameter
+	var assertion string
+	for _, param := range strings.Split(bodyStr, "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+	assert.NotEqual(t, "", assertion)
+
+	// Parse and verify the JWT
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		assert.Equal(t, "RS256", token.Method.Alg())
+		return &rsaKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, token.Valid)
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	assert.True(t, ok)
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", claims["iss"])
+	assert.Equal(t, "https://www.googleapis.com/auth/admin.directory.user", claims["scope"])
+	assert.Equal(t, "https://oauth2.googleapis.com/token", claims["aud"])
+
+	// Verify iat and exp are set and exp is ~1 hour after iat
+	iat, ok := claims["iat"].(float64)
+	assert.True(t, ok)
+	exp, ok := claims["exp"].(float64)
+	assert.True(t, ok)
+	assert.True(t, exp-iat >= 3599 && exp-iat <= 3601)
+	assert.True(t, time.Unix(int64(iat), 0).Before(time.Now().Add(time.Minute)))
+}
+
+func TestJWTProcessorConfig_Processor_SubjectAndScopesFromParams(t *testing.T) {
+	rsaKey, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	params := map[string]string{
+		ParamSubject: "admin@example.com",
+		ParamScopes:  "https://www.googleapis.com/auth/gmail.readonly",
+	}
+
+	proc, err := cfg.Processor(params, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	// Extract and parse the JWT from the body
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		return &rsaKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	claims := token.Claims.(jwt.MapClaims)
+
+	// Params should override config
+	assert.Equal(t, "admin@example.com", claims["sub"])
+	assert.Equal(t, "https://www.googleapis.com/auth/gmail.readonly", claims["scope"])
+}
+
+func TestJWTProcessorConfig_Processor_SubjectFromConfig(t *testing.T) {
+	rsaKey, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Subject:    "default-admin@example.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		return &rsaKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	claims := token.Claims.(jwt.MapClaims)
+	assert.Equal(t, "default-admin@example.com", claims["sub"])
+}
+
+func TestJWTProcessorConfig_Processor_MissingPrivateKey(t *testing.T) {
+	cfg := &JWTProcessorConfig{
+		Email:    "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:   "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL: "https://oauth2.googleapis.com/token",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestJWTProcessorConfig_Processor_InvalidPrivateKey(t *testing.T) {
+	cfg := &JWTProcessorConfig{
+		PrivateKey: []byte("not-a-real-key"),
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestJWTProcessorConfig_Processor_MissingEmail(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestJWTProcessorConfig_Processor_DefaultTokenURL(t *testing.T) {
+	rsaKey, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		// TokenURL intentionally omitted - should default to Google's endpoint
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		return &rsaKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	claims := token.Claims.(jwt.MapClaims)
+	// Default token URL should be used as the aud claim
+	assert.Equal(t, defaultTokenURL, claims["aud"])
+}
+
+func TestJWTProcessorConfig_Processor_ECDSAKey(t *testing.T) {
+	ecKey, pemBytes := generateTestECKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+	assert.NotEqual(t, "", assertion)
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		assert.Equal(t, "ES256", token.Method.Alg())
+		return &ecKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, token.Valid)
+
+	claims := token.Claims.(jwt.MapClaims)
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", claims["iss"])
+}
+
+func TestJWTProcessorConfig_Processor_Ed25519Key(t *testing.T) {
+	pubKey, _, pemBytes := generateTestEd25519Key(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://oauth2.googleapis.com/token", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var assertion string
+	for _, param := range strings.Split(string(body), "&") {
+		kv := strings.SplitN(param, "=", 2)
+		if len(kv) == 2 && kv[0] == "assertion" {
+			assertion = kv[1]
+		}
+	}
+	assert.NotEqual(t, "", assertion)
+
+	token, err := jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
+		assert.Equal(t, "EdDSA", token.Method.Alg())
+		return pubKey, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, token.Valid)
+
+	claims := token.Claims.(jwt.MapClaims)
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", claims["iss"])
+}
+
+func TestJWTProcessorConfig_StripHazmat(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Subject:    "admin@example.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	stripped := cfg.StripHazmat().(*JWTProcessorConfig)
+
+	// Private key should be redacted
+	assert.NotEqual(t, pemBytes, stripped.PrivateKey)
+	assert.Equal(t, redactedBase64, stripped.PrivateKey)
+
+	// Non-hazmat fields should be preserved
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", stripped.Email)
+	assert.Equal(t, "admin@example.com", stripped.Subject)
+	assert.Equal(t, "https://www.googleapis.com/auth/admin.directory.user", stripped.Scopes)
+	assert.Equal(t, "https://oauth2.googleapis.com/token", stripped.TokenURL)
+}
+
+func TestJWTProcessorConfig_ResponseProcessor_SealsAccessToken(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+	sealKey, pub, priv := generateTestSealKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	authCfg := NewBearerAuthConfig("trustno1")
+	validators := []RequestValidator{AllowHosts("oauth2.googleapis.com", "admin.googleapis.com")}
+
+	ctx := &SealingContext{
+		AuthConfig:        authCfg,
+		RequestValidators: validators,
+		SealKey:           pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+	assert.NotEqual(t, nil, respProc)
+
+	// Simulate Google's token response
+	googleResponse := `{"access_token":"ya29.test-access-token","expires_in":3600,"token_type":"Bearer"}`
+	resp := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(googleResponse)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	// Read the modified response body
+	respBody, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+
+	var sealedResp SealedTokenResponse
+	err = json.Unmarshal(respBody, &sealedResp)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "sealed", sealedResp.TokenType)
+	assert.True(t, sealedResp.ExpiresIn > 0 && sealedResp.ExpiresIn <= 3600)
+	assert.NotEqual(t, "", sealedResp.SealedToken)
+
+	// Unseal the token and verify it's a valid InjectProcessorConfig
+	secret, err := unsealSecret(sealedResp.SealedToken, pub, priv)
+	assert.NoError(t, err)
+
+	injector, ok := secret.ProcessorConfig.(*InjectProcessorConfig)
+	assert.True(t, ok)
+	assert.Equal(t, "ya29.test-access-token", injector.Token)
+
+	// Verify auth config was forwarded
+	_ = sealKey // used for sealing
+	secretJSON, err := json.Marshal(secret)
+	assert.NoError(t, err)
+	assert.Contains(t, string(secretJSON), "bearer_auth")
+
+	// Verify allowed hosts were forwarded
+	assert.Contains(t, string(secretJSON), "admin.googleapis.com")
+	assert.Contains(t, string(secretJSON), "oauth2.googleapis.com")
+}
+
+func TestJWTProcessorConfig_ResponseProcessor_NonOKStatus(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+	_, pub, _ := generateTestSealKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	ctx := &SealingContext{
+		AuthConfig:        NewBearerAuthConfig("trustno1"),
+		RequestValidators: nil,
+		SealKey:           pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+
+	// Simulate an error response from Google
+	resp := &http.Response{
+		StatusCode: 400,
+		Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant"}`)),
+		Header:     make(http.Header),
+	}
+
+	// Should pass through error responses without modification
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Contains(t, string(body), "invalid_grant")
+}
+
+func TestJWTProcessorConfig_ResponseProcessor_NilContext(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &JWTProcessorConfig{
+		PrivateKey: pemBytes,
+		Email:      "test-sa@my-project.iam.gserviceaccount.com",
+		Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+		TokenURL:   "https://oauth2.googleapis.com/token",
+	}
+
+	// Without a SealingContext, ResponseProcessor should return an error
+	_, err := cfg.ResponseProcessor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestJWTProcessorConfig_JSONRoundTrip(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	original := &Secret{
+		AuthConfig: NewBearerAuthConfig("trustno1"),
+		ProcessorConfig: &JWTProcessorConfig{
+			PrivateKey: pemBytes,
+			Email:      "test-sa@my-project.iam.gserviceaccount.com",
+			Subject:    "admin@example.com",
+			Scopes:     "https://www.googleapis.com/auth/admin.directory.user",
+			TokenURL:   "https://oauth2.googleapis.com/token",
+		},
+		RequestValidators: []RequestValidator{AllowHosts("oauth2.googleapis.com", "admin.googleapis.com")},
+	}
+
+	data, err := json.Marshal(original)
+	assert.NoError(t, err)
+
+	// Verify the JSON has the right key
+	assert.Contains(t, string(data), "jwt_processor")
+
+	var restored Secret
+	err = json.Unmarshal(data, &restored)
+	assert.NoError(t, err)
+
+	jwtCfg, ok := restored.ProcessorConfig.(*JWTProcessorConfig)
+	assert.True(t, ok)
+	assert.Equal(t, pemBytes, jwtCfg.PrivateKey)
+	assert.Equal(t, "test-sa@my-project.iam.gserviceaccount.com", jwtCfg.Email)
+	assert.Equal(t, "admin@example.com", jwtCfg.Subject)
+	assert.Equal(t, "https://www.googleapis.com/auth/admin.directory.user", jwtCfg.Scopes)
+	assert.Equal(t, "https://oauth2.googleapis.com/token", jwtCfg.TokenURL)
+}
+
+// unsealSecret is a test helper that decrypts a sealed secret.
+func unsealSecret(sealed string, pub *[32]byte, priv *[32]byte) (*Secret, error) {
+	ctSecret, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		return nil, err
+	}
+
+	jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, pub, priv)
+	if !ok {
+		return nil, fmt.Errorf("failed to unseal")
+	}
+
+	secret := new(Secret)
+	if err := json.Unmarshal(jsonSecret, secret); err != nil {
+		return nil, err
+	}
+
+	return secret, nil
 }
 
 func TestSigv4Processor(t *testing.T) {
@@ -424,7 +974,7 @@ func TestSigv4Processor(t *testing.T) {
 
 	// The processor will swap region/service when NoSwap is false for bug compat.
 	cfgSwap := &Sigv4ProcessorConfig{"AccessKey", "SecretKey", false}
-	processSwap, err := cfgSwap.Processor(nil)
+	processSwap, err := cfgSwap.Processor(nil, nil)
 	assert.NoError(t, err)
 
 	req := r.Clone(context.Background())
@@ -440,7 +990,7 @@ func TestSigv4Processor(t *testing.T) {
 
 	// The processor will not swap region/service when NoSwap is true.
 	cfg := &Sigv4ProcessorConfig{"AccessKey", "SecretKey", true}
-	process, err := cfg.Processor(nil)
+	process, err := cfg.Processor(nil, nil)
 	assert.NoError(t, err)
 
 	req = r.Clone(context.Background())
