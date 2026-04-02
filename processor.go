@@ -97,8 +97,9 @@ type wireProcessor struct {
 	OAuthProcessorConfig      *OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
 	OAuthBodyProcessorConfig  *OAuthBodyProcessorConfig  `json:"oauth2_body_processor,omitempty"`
 	Sigv4ProcessorConfig      *Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
-	JWTProcessorConfig        *JWTProcessorConfig        `json:"jwt_processor,omitempty"`
-	MultiProcessorConfig      *MultiProcessorConfig      `json:"multi_processor,omitempty"`
+	JWTProcessorConfig                  *JWTProcessorConfig                  `json:"jwt_processor,omitempty"`
+	ClientCredentialsProcessorConfig    *ClientCredentialsProcessorConfig    `json:"client_credentials_processor,omitempty"`
+	MultiProcessorConfig                *MultiProcessorConfig                `json:"multi_processor,omitempty"`
 }
 
 func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
@@ -117,6 +118,8 @@ func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
 		return wireProcessor{Sigv4ProcessorConfig: p}, nil
 	case *JWTProcessorConfig:
 		return wireProcessor{JWTProcessorConfig: p}, nil
+	case *ClientCredentialsProcessorConfig:
+		return wireProcessor{ClientCredentialsProcessorConfig: p}, nil
 	case *MultiProcessorConfig:
 		return wireProcessor{MultiProcessorConfig: p}, nil
 	default:
@@ -155,6 +158,10 @@ func (wp *wireProcessor) getProcessorConfig() (ProcessorConfig, error) {
 	if wp.JWTProcessorConfig != nil {
 		np += 1
 		p = wp.JWTProcessorConfig
+	}
+	if wp.ClientCredentialsProcessorConfig != nil {
+		np += 1
+		p = wp.ClientCredentialsProcessorConfig
 	}
 	if wp.MultiProcessorConfig != nil {
 		np += 1
@@ -703,13 +710,20 @@ func (c *JWTProcessorConfig) ResponseProcessor(params map[string]string, sctx *S
 		return nil, errors.New("JWT response processor requires a sealing context")
 	}
 
+	return sealTokenResponse(sctx), nil
+}
+
+// sealTokenResponse returns a response processor that reads a token endpoint's
+// JSON response, seals the access token into a new InjectProcessorConfig, and
+// replaces the response body with a SealedTokenResponse.
+func sealTokenResponse(sctx *SealingContext) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		// Pass through non-OK responses without modification
 		if resp.StatusCode != http.StatusOK {
 			return nil
 		}
 
-		// Parse Google's token response
+		// Parse the token endpoint response
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return fmt.Errorf("failed to read token response: %w", err)
@@ -763,7 +777,7 @@ func (c *JWTProcessorConfig) ResponseProcessor(params map[string]string, sctx *S
 		resp.Header.Set("Content-Type", "application/json")
 
 		return nil
-	}, nil
+	}
 }
 
 func (c *JWTProcessorConfig) StripHazmat() ProcessorConfig {
@@ -773,6 +787,66 @@ func (c *JWTProcessorConfig) StripHazmat() ProcessorConfig {
 		Subject:    c.Subject,
 		Scopes:     c.Scopes,
 		TokenURL:   c.TokenURL,
+	}
+}
+
+// ClientCredentialsProcessorConfig implements the OAuth2 client_credentials grant
+// (RFC 6749 section 4.4). Like JWTProcessorConfig, it performs a token exchange
+// and returns a sealed access token - the caller never sees the plaintext secret.
+type ClientCredentialsProcessorConfig struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	TokenURL     string `json:"token_url"`
+	Scopes       string `json:"scopes,omitempty"` // space-separated, optional
+}
+
+var _ ProcessorConfig = (*ClientCredentialsProcessorConfig)(nil)
+var _ ResponseProcessorConfig = (*ClientCredentialsProcessorConfig)(nil)
+
+func (c *ClientCredentialsProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
+	if c.ClientID == "" {
+		return nil, errors.New("missing client_id")
+	}
+	if c.ClientSecret == "" {
+		return nil, errors.New("missing client_secret")
+	}
+	if c.TokenURL == "" {
+		return nil, errors.New("missing token_url")
+	}
+
+	return func(r *http.Request) error {
+		vals := url.Values{
+			"grant_type":    {"client_credentials"},
+			"client_id":     {c.ClientID},
+			"client_secret": {c.ClientSecret},
+		}
+		if c.Scopes != "" {
+			vals.Set("scope", c.Scopes)
+		}
+
+		body := vals.Encode()
+		r.Body = io.NopCloser(strings.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		return nil
+	}, nil
+}
+
+func (c *ClientCredentialsProcessorConfig) ResponseProcessor(params map[string]string, sctx *SealingContext) (func(*http.Response) error, error) {
+	if sctx == nil {
+		return nil, errors.New("client_credentials response processor requires a sealing context")
+	}
+
+	return sealTokenResponse(sctx), nil
+}
+
+func (c *ClientCredentialsProcessorConfig) StripHazmat() ProcessorConfig {
+	return &ClientCredentialsProcessorConfig{
+		ClientID:     c.ClientID,
+		ClientSecret: redactedStr,
+		TokenURL:     c.TokenURL,
+		Scopes:       c.Scopes,
 	}
 }
 
