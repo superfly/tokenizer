@@ -91,15 +91,15 @@ type ResponseProcessorConfig interface {
 }
 
 type wireProcessor struct {
-	InjectProcessorConfig     *InjectProcessorConfig     `json:"inject_processor,omitempty"`
-	InjectHMACProcessorConfig *InjectHMACProcessorConfig `json:"inject_hmac_processor,omitempty"`
-	InjectBodyProcessorConfig *InjectBodyProcessorConfig `json:"inject_body_processor,omitempty"`
-	OAuthProcessorConfig      *OAuthProcessorConfig      `json:"oauth2_processor,omitempty"`
-	OAuthBodyProcessorConfig  *OAuthBodyProcessorConfig  `json:"oauth2_body_processor,omitempty"`
-	Sigv4ProcessorConfig      *Sigv4ProcessorConfig      `json:"sigv4_processor,omitempty"`
-	JWTProcessorConfig                  *JWTProcessorConfig                  `json:"jwt_processor,omitempty"`
-	ClientCredentialsProcessorConfig    *ClientCredentialsProcessorConfig    `json:"client_credentials_processor,omitempty"`
-	MultiProcessorConfig                *MultiProcessorConfig                `json:"multi_processor,omitempty"`
+	InjectProcessorConfig            *InjectProcessorConfig            `json:"inject_processor,omitempty"`
+	InjectHMACProcessorConfig        *InjectHMACProcessorConfig        `json:"inject_hmac_processor,omitempty"`
+	InjectBodyProcessorConfig        *InjectBodyProcessorConfig        `json:"inject_body_processor,omitempty"`
+	OAuthProcessorConfig             *OAuthProcessorConfig             `json:"oauth2_processor,omitempty"`
+	OAuthBodyProcessorConfig         *OAuthBodyProcessorConfig         `json:"oauth2_body_processor,omitempty"`
+	Sigv4ProcessorConfig             *Sigv4ProcessorConfig             `json:"sigv4_processor,omitempty"`
+	JWTProcessorConfig               *JWTProcessorConfig               `json:"jwt_processor,omitempty"`
+	ClientCredentialsProcessorConfig *ClientCredentialsProcessorConfig `json:"client_credentials_processor,omitempty"`
+	MultiProcessorConfig             *MultiProcessorConfig             `json:"multi_processor,omitempty"`
 }
 
 func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
