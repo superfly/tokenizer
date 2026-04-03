@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -918,6 +919,248 @@ func TestJWTProcessorConfig_JSONRoundTrip(t *testing.T) {
 	assert.Equal(t, "admin@example.com", jwtCfg.Subject)
 	assert.Equal(t, "https://www.googleapis.com/auth/admin.directory.user", jwtCfg.Scopes)
 	assert.Equal(t, "https://oauth2.googleapis.com/token", jwtCfg.TokenURL)
+}
+
+func TestClientCredentialsProcessorConfig_BuildsCorrectBody(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, cfg.TokenURL, nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "application/x-www-form-urlencoded", req.Header.Get("Content-Type"))
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+
+	vals, err := url.ParseQuery(string(body))
+	assert.NoError(t, err)
+
+	assert.Equal(t, "client_credentials", vals.Get("grant_type"))
+	assert.Equal(t, "my-client-id", vals.Get("client_id"))
+	assert.Equal(t, "my-client-secret", vals.Get("client_secret"))
+}
+
+func TestClientCredentialsProcessorConfig_IncludesScopeWhenSet(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+		Scopes:       "mailbox.read mailbox.write",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, cfg.TokenURL, nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+
+	vals, err := url.ParseQuery(string(body))
+	assert.NoError(t, err)
+
+	assert.Equal(t, "mailbox.read mailbox.write", vals.Get("scope"))
+}
+
+func TestClientCredentialsProcessorConfig_OmitsScopeWhenEmpty(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, cfg.TokenURL, nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+
+	assert.NotContains(t, string(body), "scope=")
+}
+
+func TestClientCredentialsProcessorConfig_MissingClientID(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestClientCredentialsProcessorConfig_MissingClientSecret(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID: "my-client-id",
+		TokenURL: "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestClientCredentialsProcessorConfig_MissingTokenURL(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestClientCredentialsProcessorConfig_StripHazmat(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "super-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+		Scopes:       "mailbox.read",
+	}
+
+	stripped := cfg.StripHazmat().(*ClientCredentialsProcessorConfig)
+
+	assert.Equal(t, redactedStr, stripped.ClientSecret)
+	assert.Equal(t, "my-client-id", stripped.ClientID)
+	assert.Equal(t, "https://api.helpscout.net/v2/oauth2/token", stripped.TokenURL)
+	assert.Equal(t, "mailbox.read", stripped.Scopes)
+}
+
+func TestClientCredentialsProcessorConfig_ResponseProcessor_SealsAccessToken(t *testing.T) {
+	_, pub, priv := generateTestSealKey(t)
+
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	ctx := &SealingContext{
+		AuthConfig:        NewBearerAuthConfig("trustno1"),
+		RequestValidators: []RequestValidator{AllowHosts("api.helpscout.net")},
+		SealKey:           pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+	assert.NotEqual(t, nil, respProc)
+
+	tokenResponse := `{"access_token":"hs-access-token-xyz","expires_in":7200,"token_type":"Bearer"}`
+	resp := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(tokenResponse)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	respBody, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+
+	var sealedResp SealedTokenResponse
+	err = json.Unmarshal(respBody, &sealedResp)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "sealed", sealedResp.TokenType)
+	assert.True(t, sealedResp.ExpiresIn > 0 && sealedResp.ExpiresIn <= 7200)
+	assert.NotEqual(t, "", sealedResp.SealedToken)
+
+	secret, err := unsealSecret(sealedResp.SealedToken, pub, priv)
+	assert.NoError(t, err)
+
+	injector, ok := secret.ProcessorConfig.(*InjectProcessorConfig)
+	assert.True(t, ok)
+	assert.Equal(t, "hs-access-token-xyz", injector.Token)
+}
+
+func TestClientCredentialsProcessorConfig_ResponseProcessor_NonOKStatus(t *testing.T) {
+	_, pub, _ := generateTestSealKey(t)
+
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	ctx := &SealingContext{
+		AuthConfig: NewBearerAuthConfig("trustno1"),
+		SealKey:    pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+
+	resp := &http.Response{
+		StatusCode: 401,
+		Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_client"}`)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Contains(t, string(body), "invalid_client")
+}
+
+func TestClientCredentialsProcessorConfig_ResponseProcessor_NilContext(t *testing.T) {
+	cfg := &ClientCredentialsProcessorConfig{
+		ClientID:     "my-client-id",
+		ClientSecret: "my-client-secret",
+		TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+	}
+
+	_, err := cfg.ResponseProcessor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestClientCredentialsProcessorConfig_JSONRoundTrip(t *testing.T) {
+	original := &Secret{
+		AuthConfig: NewBearerAuthConfig("trustno1"),
+		ProcessorConfig: &ClientCredentialsProcessorConfig{
+			ClientID:     "my-client-id",
+			ClientSecret: "my-client-secret",
+			TokenURL:     "https://api.helpscout.net/v2/oauth2/token",
+			Scopes:       "mailbox.read mailbox.write",
+		},
+		RequestValidators: []RequestValidator{AllowHosts("api.helpscout.net")},
+	}
+
+	data, err := json.Marshal(original)
+	assert.NoError(t, err)
+
+	assert.Contains(t, string(data), "client_credentials_processor")
+
+	var restored Secret
+	err = json.Unmarshal(data, &restored)
+	assert.NoError(t, err)
+
+	ccCfg, ok := restored.ProcessorConfig.(*ClientCredentialsProcessorConfig)
+	assert.True(t, ok)
+	assert.Equal(t, "my-client-id", ccCfg.ClientID)
+	assert.Equal(t, "my-client-secret", ccCfg.ClientSecret)
+	assert.Equal(t, "https://api.helpscout.net/v2/oauth2/token", ccCfg.TokenURL)
+	assert.Equal(t, "mailbox.read mailbox.write", ccCfg.Scopes)
 }
 
 // unsealSecret is a test helper that decrypts a sealed secret.

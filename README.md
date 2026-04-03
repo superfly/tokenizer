@@ -192,6 +192,52 @@ conn.headers[:proxy_tokenizer] = "#{Base64.encode64(sealed_secret)}; #{processor
 conn.get("http://api.stripe.com")
 ```
 
+### Client credentials processor
+
+The `client_credentials_processor` implements the OAuth2 `client_credentials` grant ([RFC 6749 section 4.4](https://tools.ietf.org/html/rfc6749#section-4.4)) for machine-to-machine auth (HelpScout, and similar API platforms). It follows the same two-step sealed pattern as `jwt_processor` - see that section for the full flow description.
+
+```ruby
+secret = {
+    client_credentials_processor: {
+        client_id: "my-client-id",
+        client_secret: "my-client-secret",
+        token_url: "https://api.helpscout.net/v2/oauth2/token",
+        scopes: "mailbox.read mailbox.write"  # optional
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    },
+    allowed_hosts: ["api.helpscout.net"]
+}
+```
+
+Step 1 - Exchange the sealed client credentials for a sealed access token (send to the token endpoint through tokenizer):
+
+```ruby
+resp = conn.post("http://api.helpscout.net/v2/oauth2/token")
+sealed_access_token = JSON.parse(resp.body)["sealed_token"]
+```
+
+Step 2 - Use the sealed access token for API calls (same as `jwt_processor`):
+
+```ruby
+conn2 = Faraday.new(
+    proxy: "http://tokenizer.flycast",
+    headers: {
+        proxy_tokenizer: "#{sealed_access_token}",
+        proxy_authorization: "Bearer trustno1"
+    }
+)
+conn2.get("http://api.helpscout.net/v2/conversations")
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `client_id` | yes | OAuth2 client ID |
+| `client_secret` | yes | OAuth2 client secret (sealed, never exposed) |
+| `token_url` | yes | Token endpoint URL |
+| `scopes` | no | Space-separated OAuth2 scopes |
+
 ## Host allowlist
 
 If a client is fully compromised, the attacker could send encrypted secrets via tokenizer to a service that simply echoes back the request. This way, the attacker could learn the plaintext value of the secret. To mitigate against this, secrets can specify which hosts they may be used against.
