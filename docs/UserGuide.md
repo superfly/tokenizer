@@ -354,7 +354,6 @@ The json for the injection processor is:
     "token": "MY_SECRET_TOKEN",
     "allowed_fmt": ["%s"],
     "allowed_dst": ["X-Auth"]
-    ]
   }
 ```
 
@@ -423,7 +422,7 @@ curl -s -x https://tokenizer.fly.dev \
 
 ### InjectBodyProcessorConfig
 
-TBD replaced included token into the body by replacing a template placeholder...
+TBD replaces included token into the body by replacing a template placeholder...
 
 ### OAuthProcessorConfig
 
