@@ -2,6 +2,16 @@
 
 Tokenizer is an HTTP proxy that injects third party authentication credentials into requests. Clients encrypt third party secrets using the proxy's public key. When the client wants to send a request to the third party service, it does so via the proxy, sending along the encrypted secret in the `Proxy-Tokenizer` header. The proxy decrypts the secret and injects it into the client's request. To ensure that encrypted secrets can only be used by authorized clients, the encrypted data also includes instructions on authenticating the client.
 
+# Docs
+
+More docs can be found under [docs/](docs/):
+
+* [The Fly tokenizer](docs/FlyTokenizer.md) describes the tokenizer that Fly runs.
+* [Quick start](docs/QuickStart.md) describes how to quickly setup, run, and use your own tokenizer.
+* [User guide](docs/UserGuide.md) describes how to seal tokens and make requests through the tokenizer with them.
+
+# Example
+
 Here's an example secret that the client encrypts using the proxy's public key:
 
 ```ruby
