@@ -1,6 +1,6 @@
 # Quick Start
 
-Here's a short walk through of setting up and using the tokenizer proxy.
+Here's a short walk through of setting up and using your own tokenizer proxy.
 The use case here is running the proxy from a public fly address, such that it
 is accessible by any other fly app that has a valid wrapped secret.
 
@@ -49,7 +49,17 @@ fly -c fly.toml.timkenizer secrets set OPEN_KEY=$OPEN_KEY
 
 # use the SEAL_KEY to generate a proxy token that will inject a secret token into requests to the target.
 # here restricted to use against https://timflyio-go-example.fly.dev from app=thenewsh
-TOKEN=$(go run ./cmd/sealtoken -host timflyio-go-example.fly.dev -org tim-newsham -app thenewsh MY_SECRET_TOKEN)
+cat > token.json <<_EOF_
+{ 
+  "inject_processor": { "token": "MY_SECRET_TOKEN" },
+  "allowed_hosts": ["timflyio-go-example.fly.dev"],
+  "fly_src_auth": { 
+    "allowed_orgs": ["tim-newsham"],
+    "allowed_apps": ["thenewsh"]
+  }
+}
+_EOF_
+TOKEN=$(go run ./cmd/sealtoken -json "$(cat token.json)")
 
 # install the TOKEN in your approved app and use it to access the approved url.
 # the secret token (MY_SECRET_TOKEN) will be added as a bearer token.
