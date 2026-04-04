@@ -229,8 +229,8 @@ func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.
 	}
 
 	connResult, err := t.processorsFromRequest(ctx.Req)
-	if connResult.safeSecret != "" {
-		pud.connLog = pud.connLog.WithField("secret", connResult.safeSecret)
+	if len(connResult.safeSecrets) > 0 {
+		pud.connLog = pud.connLog.WithField("secrets", connResult.safeSecrets)
 	}
 	if err != nil {
 		pud.connLog.WithError(err).Warn("find processor (CONNECT)")
@@ -302,8 +302,8 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 
 	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
 	reqResult, err := t.processorsFromRequest(req)
-	if reqResult.safeSecret != "" {
-		pud.reqLog = pud.reqLog.WithField("secret", reqResult.safeSecret)
+	if len(reqResult.safeSecrets) > 0 {
+		pud.reqLog = pud.reqLog.WithField("secrets", reqResult.safeSecrets)
 	}
 	if err != nil {
 		pud.reqLog.WithError(err).Warn("find processor")
@@ -384,10 +384,17 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 	return resp
 }
 
+// loggerSecret holds one secret and params from the Proxy-Tokenizer header for logging.
+// The secrets are sanitized of their hazmat.
+type loggerSecret struct {
+	Secret string `json:"secret"`
+	Params string `json:"params"`
+}
+
 type processorsResult struct {
-	request    []RequestProcessor
-	response   []func(*http.Response) error
-	safeSecret string
+	request     []RequestProcessor
+	response    []func(*http.Response) error
+	safeSecrets []loggerSecret
 }
 
 func (t *tokenizer) processorsFromRequest(req *http.Request) (*processorsResult, error) {
@@ -417,7 +424,11 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) (*processorsResult,
 			return result, fmt.Errorf("bad secret json: %w", err)
 		}
 
-		result.safeSecret = secret.StripHazmatString()
+		// capture secret and params for logger
+		safeSecret := secret.StripHazmatString()
+		pstr, _ := json.Marshal(params)
+		result.safeSecrets = append(result.safeSecrets, loggerSecret{safeSecret, string(pstr)})
+
 		if err = secret.AuthRequest(t, req); err != nil {
 			return result, fmt.Errorf("unauthorized to use secret: %w", err)
 		}
