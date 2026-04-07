@@ -11,7 +11,7 @@ To seal a token you need the sealing key of your tokenizer.
 ## Command line
 
 To seal a token with the command line
-* Place the sealing key in your environment as `SEAL_KEY`.
+* Place the sealing key in your environment as `SEAL_KEY`. Alternately place the unsealing key in your environment as `OPEN_KEY`.
 * Construct the sealing information as json, perhaps putting it into a file such as `token.json`.
 * Run `go run ./cmd/tokenizer -json-file token.json` or `go run ./cmd/tokenizer -json $JSONOBJ`.
 
@@ -35,6 +35,14 @@ go run ./cmd/tokenizer seal -json-file token.json
 
 # Using the json directly
 go run ./cmd/tokenizer seal -json '{"inject_processor":{"token":"MY_SECRET_TOKEN"},"allowed_hosts":["timflyio-go-example.fly.dev"],"fly_src_auth":{"allowed_orgs":["tim-newsham"],"allowed_apps":["thenewsh"]}}'
+```
+
+On a deployed tokenizer where `OPEN_KEY` is already set, you can seal and unseal keys without making any additional settings:
+
+```bash
+TOKEN=$(tokenizer seal -json '{"inject_processor":{"token":"MY_SECRET_TOKEN"},"allowed_hosts":["timflyio-go-example.fly.dev"],"fly_src_auth":{"allowed_orgs":["tim-newsham"],"allowed_apps":["thenewsh"]}}')
+echo $TOKEN
+tokenizer unseal -token "$TOKEN"
 ```
 
 ## Go
