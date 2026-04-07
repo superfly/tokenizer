@@ -318,7 +318,7 @@ export OPEN_KEY=$(openssl rand -hex 32)
 Run the tokenizer server:
 
 ```shell
-tokenizer
+tokenizer serve -use-flysrc=true
 ```
 
 The output will contain the public (seal) key, which can be used for encrypting secrets.
