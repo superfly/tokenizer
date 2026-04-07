@@ -533,6 +533,7 @@ func (c *Sigv4ProcessorConfig) StripHazmat() ProcessorConfig {
 	return &Sigv4ProcessorConfig{
 		AccessKey: redactedStr,
 		SecretKey: redactedStr,
+		NoSwap:    c.NoSwap,
 	}
 }
 
