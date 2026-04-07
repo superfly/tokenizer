@@ -38,8 +38,7 @@ func runSeal(cmd string, args []string) {
 	case *sealKeyP != "":
 		sealKey = *sealKeyP
 	case *openKey != "":
-		tkz := tokenizer.NewTokenizer(*openKey)
-		sealKey = tkz.SealKey()
+		sealKey = tokenizer.NewTokenizer(*openKey).SealKey()
 	default:
 		fmt.Fprintf(os.Stderr, "missing OPEN_KEY or SEAL_KEY\n")
 		os.Exit(1)
