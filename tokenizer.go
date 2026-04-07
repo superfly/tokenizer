@@ -399,13 +399,13 @@ type processorsResult struct {
 }
 
 // OpenSealed decodes and unseals a sealed token and returns its raw (unparsed) contents.
-func OpenSealed(b64Secret string, pub, priv *[32]byte) ([]byte, error) {
+func (t *tokenizer) OpenSealed(b64Secret string) ([]byte, error) {
 	ctSecret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Secret))
 	if err != nil {
 		return nil, fmt.Errorf("bad Proxy-Tokenizer encoding: %w", err)
 	}
 
-	jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, pub, priv)
+	jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, t.pub, t.priv)
 	if !ok {
 		return nil, errors.New("failed Proxy-Tokenizer decryption")
 	}
@@ -424,7 +424,7 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) (*processorsResult,
 			return result, err
 		}
 
-		jsonSecret, err := OpenSealed(b64Secret, t.pub, t.priv)
+		jsonSecret, err := t.OpenSealed(b64Secret)
 		if err != nil {
 			return result, err
 		}

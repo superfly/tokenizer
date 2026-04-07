@@ -36,13 +36,8 @@ func runUnseal(cmd string, args []string) {
 		os.Exit(1)
 	}
 
-	priv, pub, err := tokenizer.ParseOpenKey(*openKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "OPEN_KEY: %v\n", err)
-		os.Exit(1)
-	}
-
-	secret, err := tokenizer.OpenSealed(*token, pub, priv)
+	tkz := tokenizer.NewTokenizer(*openKey)
+	secret, err := tkz.OpenSealed(*token)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "token: %v\n", err)
 		os.Exit(1)
