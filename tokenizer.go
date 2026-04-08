@@ -109,7 +109,7 @@ func ParseOpenKey(openKey string) (*[32]byte, *[32]byte, error) {
 		return nil, nil, fmt.Errorf("bad private key")
 	}
 	if len(privBytes) != 32 {
-		fmt.Errorf("bad private key size: %d", len(privBytes))
+		return nil, nil, fmt.Errorf("bad private key size: %d", len(privBytes))
 	}
 	priv := (*[32]byte)(privBytes)
 	pub := new([32]byte)

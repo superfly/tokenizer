@@ -14,7 +14,6 @@ tokenizer version displays the version
 func runVersion(cmd string, args []string) {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	parseFlags(fs, versionUsage, args)
-	parseFlags(fs, versionUsage, args)
 
 	fmt.Fprintln(os.Stderr, versionString())
 }
