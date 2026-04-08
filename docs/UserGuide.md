@@ -4,16 +4,16 @@ This document describes how to seal tokens and how to make requests with them.
 
 # Sealing tokens
 
-To seal a token you need the sealing key of your tokenizer.
-* If you have the `OPEN_KEY` set in your environment you can get the seal by running `go run ./cmd/tokenizer -sealkey`.
+To seal a token you need the sealing key of your tokenizer. 
+* If you have the `OPEN_KEY` set in your environment you can get the seal by running `go run ./cmd/tokenizer sealkey`.
 * The seal key is written by the server when the server is started on a line like `listening address="localhost:8080" seal_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`.
 
 ## Command line
 
 To seal a token with the command line
-* Place the sealing key in your environment as `SEAL_KEY`.
+* Place the sealing key in your environment as `SEAL_KEY`. Alternately place the unsealing key in your environment as `OPEN_KEY`.
 * Construct the sealing information as json, perhaps putting it into a file such as `token.json`.
-* Run `go run ./cmd/sealtoken -json "$(cat token.json)"` or place the sealing information directly on the command line.
+* Run `go run ./cmd/tokenizer -json-file token.json` or `go run ./cmd/tokenizer -json $JSONOBJ`.
 
 Example:
 
@@ -31,10 +31,18 @@ cat > token.json <<_EOF_
   }
 }
 _EOF_
-go run ./cmd/sealtoken -json "$(cat token.json)"
+go run ./cmd/tokenizer seal -json-file token.json
 
 # Using the json directly
-go run ./cmd/sealtoken -json '{"inject_processor":{"token":"MY_SECRET_TOKEN"},"allowed_hosts":["timflyio-go-example.fly.dev"],"fly_src_auth":{"allowed_orgs":["tim-newsham"],"allowed_apps":["thenewsh"]}}'
+go run ./cmd/tokenizer seal -json '{"inject_processor":{"token":"MY_SECRET_TOKEN"},"allowed_hosts":["timflyio-go-example.fly.dev"],"fly_src_auth":{"allowed_orgs":["tim-newsham"],"allowed_apps":["thenewsh"]}}'
+```
+
+On a deployed tokenizer where `OPEN_KEY` is already set, you can seal and unseal keys without making any additional settings:
+
+```bash
+TOKEN=$(tokenizer seal -json '{"inject_processor":{"token":"MY_SECRET_TOKEN"},"allowed_hosts":["timflyio-go-example.fly.dev"],"fly_src_auth":{"allowed_orgs":["tim-newsham"],"allowed_apps":["thenewsh"]}}')
+echo $TOKEN
+tokenizer unseal -token "$TOKEN"
 ```
 
 ## Go
@@ -129,7 +137,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -159,7 +167,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "bearer_auth": {"digest": "K7gNU3sdo+OL0wNhqoVWhr3g6s1xYv72ol/pe/Unols="}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -215,7 +223,7 @@ SEAL='{
     ]
   }
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 # This will only work from Machines in the thenewsh App.
 echo curl -s -x https://tokenizer.fly.dev:8443 \
@@ -247,12 +255,11 @@ SEAL='{
   "allowed_host_pattern": ".*\\.fly\\.dev$",
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
   http://timflyio-go-example.fly.dev
-
 ```
 
 ## Request Processing
@@ -296,7 +303,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 PARAMS='{"fmt": "Cower %s"}'
 curl -s -x https://tokenizer.fly.dev \
@@ -334,7 +341,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 PARAMS='{"dst": "Z-Auth"}'
 curl -s -x https://tokenizer.fly.dev \
@@ -373,7 +380,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -419,7 +426,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -453,7 +460,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -497,7 +504,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 PARAM='{"st":"refresh"}'
 curl -s -x https://tokenizer.fly.dev \
@@ -545,7 +552,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 PARAM='{"st":"refresh"}'
 curl -s -x https://tokenizer.fly.dev \
@@ -601,7 +608,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -729,7 +736,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 curl -s -x https://tokenizer.fly.dev \
   -H "Proxy-Tokenizer: $SEALED" \
@@ -765,7 +772,7 @@ SEAL='{
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
   "no_auth": {}
 }'
-SEALED=$(go run cmd/sealtoken/main.go -json "$SEAL")
+SEALED=$(go run ./cmd/tokenizer seal -json "$SEAL")
 
 PARAMS='{"fmt": "Cower %s", "dst": "X-Auth"}'
 curl -s -x https://tokenizer.fly.dev \

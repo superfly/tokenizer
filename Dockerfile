@@ -17,4 +17,4 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM alpine:latest AS runner
 WORKDIR /root
 COPY --from=builder /go/src/github.com/superfly/tokenizer/bin/tokenizer /usr/local/bin/tokenizer
-CMD ["tokenizer"]
+CMD ["tokenizer", "serve", "-use-flysrc=true"]
