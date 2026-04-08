@@ -15,7 +15,7 @@ To run a test server locally:
 source ./.envrc
 
 # run server
-go run .
+go run . serve -use-flysrc=true
 ```
 
 The `github.com/superfly/tokenizer/cmd/curl` package has instructions for sending requests via this server with a test client.

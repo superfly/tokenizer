@@ -103,17 +103,25 @@ func TokenizerHostnames(hostnames ...string) Option {
 	}
 }
 
-func NewTokenizer(openKey string, opts ...Option) *tokenizer {
+func ParseOpenKey(openKey string) (*[32]byte, *[32]byte, error) {
 	privBytes, err := hex.DecodeString(openKey)
 	if err != nil {
-		logrus.WithError(err).Panic("bad private key")
+		return nil, nil, fmt.Errorf("bad private key")
 	}
 	if len(privBytes) != 32 {
-		logrus.Panicf("bad private key size: %d", len(privBytes))
+		return nil, nil, fmt.Errorf("bad private key size: %d", len(privBytes))
 	}
 	priv := (*[32]byte)(privBytes)
 	pub := new([32]byte)
 	curve25519.ScalarBaseMult(pub, priv)
+	return priv, pub, nil
+}
+
+func NewTokenizer(openKey string, opts ...Option) *tokenizer {
+	priv, pub, err := ParseOpenKey(openKey)
+	if err != nil {
+		logrus.WithError(err).Panic(err.Error())
+	}
 
 	proxy := goproxy.NewProxyHttpServer()
 	tkz := &tokenizer{ProxyHttpServer: proxy, priv: priv, pub: pub, flysrcParser: nil}
@@ -397,6 +405,20 @@ type processorsResult struct {
 	safeSecrets []loggerSecret
 }
 
+// OpenSealed decodes and unseals a sealed token and returns its raw (unparsed) contents.
+func (t *tokenizer) OpenSealed(b64Secret string) ([]byte, error) {
+	ctSecret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Secret))
+	if err != nil {
+		return nil, fmt.Errorf("bad Proxy-Tokenizer encoding: %w", err)
+	}
+
+	jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, t.pub, t.priv)
+	if !ok {
+		return nil, errors.New("failed Proxy-Tokenizer decryption")
+	}
+	return jsonSecret, nil
+}
+
 func (t *tokenizer) processorsFromRequest(req *http.Request) (*processorsResult, error) {
 	hdrs := req.Header[headerProxyTokenizer]
 	result := &processorsResult{
@@ -409,14 +431,9 @@ func (t *tokenizer) processorsFromRequest(req *http.Request) (*processorsResult,
 			return result, err
 		}
 
-		ctSecret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Secret))
+		jsonSecret, err := t.OpenSealed(b64Secret)
 		if err != nil {
-			return result, fmt.Errorf("bad Proxy-Tokenizer encoding: %w", err)
-		}
-
-		jsonSecret, ok := box.OpenAnonymous(nil, ctSecret, t.pub, t.priv)
-		if !ok {
-			return result, errors.New("failed Proxy-Tokenizer decryption")
+			return result, err
 		}
 
 		secret := new(Secret)

@@ -44,12 +44,12 @@ fly -c fly.toml.timkenizer launch
 # generate and set the secret "open" and "seal" keys.
 # install the OPEN_KEY on the server and keep the SEAL_KEY for later.
 export OPEN_KEY=$(openssl rand -hex 32)
-export SEAL_KEY=$(go run ./cmd/tokenizer -sealkey)
+export SEAL_KEY=$(go run ./cmd/tokenizer sealkey)
 fly -c fly.toml.timkenizer secrets set OPEN_KEY=$OPEN_KEY
 
 # use the SEAL_KEY to generate a proxy token that will inject a secret token into requests to the target.
 # here restricted to use against https://timflyio-go-example.fly.dev from app=thenewsh
-cat > token.json <<_EOF_
+JSON='
 { 
   "inject_processor": { "token": "MY_SECRET_TOKEN" },
   "allowed_hosts": ["timflyio-go-example.fly.dev"],
@@ -57,9 +57,8 @@ cat > token.json <<_EOF_
     "allowed_orgs": ["tim-newsham"],
     "allowed_apps": ["thenewsh"]
   }
-}
-_EOF_
-TOKEN=$(go run ./cmd/sealtoken -json "$(cat token.json)")
+}'
+TOKEN=$(go run ./cmd/tokenizer seal -json "$JSON")
 
 # install the TOKEN in your approved app and use it to access the approved url.
 # the secret token (MY_SECRET_TOKEN) will be added as a bearer token.
