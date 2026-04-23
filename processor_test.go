@@ -1163,6 +1163,415 @@ func TestClientCredentialsProcessorConfig_JSONRoundTrip(t *testing.T) {
 	assert.Equal(t, "mailbox.read mailbox.write", ccCfg.Scopes)
 }
 
+func TestGitHubAppProcessorConfig_Processor_BuildsValidJWT(t *testing.T) {
+	rsaKey, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.github.com/", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	// Verify GitHub-required headers
+	authHeader := req.Header.Get("Authorization")
+	assert.True(t, strings.HasPrefix(authHeader, "Bearer "))
+	assert.Equal(t, "application/vnd.github+json", req.Header.Get("Accept"))
+	assert.Equal(t, "2022-11-28", req.Header.Get("X-GitHub-Api-Version"))
+
+	// URL path is rewritten to the installation access_tokens endpoint
+	assert.Equal(t, "/app/installations/789012/access_tokens", req.URL.Path)
+
+	// Request body is empty (GitHub requires no body)
+	if req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, len(body))
+	}
+	assert.Equal(t, int64(0), req.ContentLength)
+
+	// Parse and verify the JWT
+	jwtStr := strings.TrimPrefix(authHeader, "Bearer ")
+	token, err := jwt.Parse(jwtStr, func(token *jwt.Token) (interface{}, error) {
+		assert.Equal(t, "RS256", token.Method.Alg())
+		return &rsaKey.PublicKey, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, token.Valid)
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	assert.True(t, ok)
+	assert.Equal(t, "123456", claims["iss"])
+
+	// exp should be ~10min after iat (GitHub's max)
+	iat, ok := claims["iat"].(float64)
+	assert.True(t, ok)
+	exp, ok := claims["exp"].(float64)
+	assert.True(t, ok)
+	diff := exp - iat
+	assert.True(t, diff >= 599 && diff <= 601)
+	assert.True(t, time.Unix(int64(iat), 0).Before(time.Now().Add(time.Minute)))
+
+	// GitHub JWTs must not include aud, scope, or sub
+	_, hasAud := claims["aud"]
+	assert.False(t, hasAud)
+	_, hasScope := claims["scope"]
+	assert.False(t, hasScope)
+	_, hasSub := claims["sub"]
+	assert.False(t, hasSub)
+}
+
+func TestGitHubAppProcessorConfig_Processor_CustomTokenURL(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+		TokenURL:       "https://github.enterprise.example/api/v3/app/installations/{installation_id}/access_tokens",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://github.enterprise.example/", nil)
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "/api/v3/app/installations/789012/access_tokens", req.URL.Path)
+}
+
+func TestGitHubAppProcessorConfig_Processor_MissingPrivateKey(t *testing.T) {
+	cfg := &GitHubAppProcessorConfig{
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_Processor_InvalidPrivateKey(t *testing.T) {
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     []byte("not-a-real-key"),
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_Processor_MissingAppID(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		InstallationID: "789012",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_Processor_MissingInstallationID(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey: pemBytes,
+		AppID:      "123456",
+	}
+
+	_, err := cfg.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_Processor_RejectsNonRSAKey(t *testing.T) {
+	// GitHub Apps require RSA keys (RS256). Reject ECDSA and Ed25519.
+	_, ecPEM := generateTestECKey(t)
+	cfgEC := &GitHubAppProcessorConfig{
+		PrivateKey:     ecPEM,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+	_, err := cfgEC.Processor(nil, nil)
+	assert.Error(t, err)
+
+	_, _, ed25519PEM := generateTestEd25519Key(t)
+	cfgEd := &GitHubAppProcessorConfig{
+		PrivateKey:     ed25519PEM,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+	_, err = cfgEd.Processor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_Processor_ClearsExistingBody(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	proc, err := cfg.Processor(nil, nil)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.github.com/", strings.NewReader("stale body"))
+	assert.NoError(t, err)
+
+	err = proc(req)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(body))
+	assert.Equal(t, int64(0), req.ContentLength)
+}
+
+func TestGitHubAppProcessorConfig_StripHazmat(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+		TokenURL:       "https://api.github.com/app/installations/{installation_id}/access_tokens",
+	}
+
+	stripped := cfg.StripHazmat().(*GitHubAppProcessorConfig)
+
+	assert.NotEqual(t, pemBytes, stripped.PrivateKey)
+	assert.Equal(t, redactedBase64, stripped.PrivateKey)
+
+	assert.Equal(t, "123456", stripped.AppID)
+	assert.Equal(t, "789012", stripped.InstallationID)
+	assert.Equal(t, "https://api.github.com/app/installations/{installation_id}/access_tokens", stripped.TokenURL)
+}
+
+func TestGitHubAppProcessorConfig_ResponseProcessor_SealsInstallationToken(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+	_, pub, priv := generateTestSealKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	// Outer secret is authenticated with bearer auth and pinned to api.github.com
+	// for the exchange itself. The sealed installation token should also be
+	// pinned to api.github.com regardless of what the outer secret allowed.
+	ctx := &SealingContext{
+		AuthConfig:        NewBearerAuthConfig("trustno1"),
+		RequestValidators: []RequestValidator{AllowHosts("api.github.com")},
+		SealKey:           pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+	assert.NotEqual(t, nil, respProc)
+
+	expiresAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	githubResp := fmt.Sprintf(`{"token":"ghs_installationtokenXYZ","expires_at":%q,"permissions":{"contents":"read"}}`, expiresAt)
+	resp := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(githubResp)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	respBody, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+
+	var sealedResp SealedTokenResponse
+	err = json.Unmarshal(respBody, &sealedResp)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "sealed", sealedResp.TokenType)
+	assert.True(t, sealedResp.ExpiresIn > 0 && sealedResp.ExpiresIn <= 3600)
+	assert.NotEqual(t, "", sealedResp.SealedToken)
+
+	secret, err := unsealSecret(sealedResp.SealedToken, pub, priv)
+	assert.NoError(t, err)
+
+	injector, ok := secret.ProcessorConfig.(*InjectProcessorConfig)
+	assert.True(t, ok)
+	assert.Equal(t, "ghs_installationtokenXYZ", injector.Token)
+	// GitHub's legacy auth header uses `token <value>` (still accepted alongside Bearer).
+	assert.Equal(t, "token %s", injector.FmtProcessor.Fmt)
+
+	// Auth and host pinning forwarded into the sealed secret
+	secretJSON, err := json.Marshal(secret)
+	assert.NoError(t, err)
+	assert.Contains(t, string(secretJSON), "bearer_auth")
+	assert.Contains(t, string(secretJSON), "api.github.com")
+}
+
+func TestGitHubAppProcessorConfig_ResponseProcessor_PinsToAPIHostWithoutOuterValidator(t *testing.T) {
+	// Even if the outer sealed secret has no host pin, the sealed installation
+	// token must be pinned to api.github.com so it can't be replayed elsewhere.
+	_, pemBytes := generateTestRSAKey(t)
+	_, pub, priv := generateTestSealKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	ctx := &SealingContext{
+		AuthConfig:        NewBearerAuthConfig("trustno1"),
+		RequestValidators: nil,
+		SealKey:           pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+
+	expiresAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	githubResp := fmt.Sprintf(`{"token":"ghs_abc","expires_at":%q}`, expiresAt)
+	resp := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(githubResp)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	var sealedResp SealedTokenResponse
+	respBody, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	err = json.Unmarshal(respBody, &sealedResp)
+	assert.NoError(t, err)
+
+	secret, err := unsealSecret(sealedResp.SealedToken, pub, priv)
+	assert.NoError(t, err)
+
+	secretJSON, err := json.Marshal(secret)
+	assert.NoError(t, err)
+	assert.Contains(t, string(secretJSON), "api.github.com")
+}
+
+func TestGitHubAppProcessorConfig_ResponseProcessor_MissingToken(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+	_, pub, _ := generateTestSealKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	ctx := &SealingContext{
+		AuthConfig: NewBearerAuthConfig("trustno1"),
+		SealKey:    pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+
+	resp := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(`{"not_token":"nope"}`)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_ResponseProcessor_NonOKStatus(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+	_, pub, _ := generateTestSealKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	ctx := &SealingContext{
+		AuthConfig: NewBearerAuthConfig("trustno1"),
+		SealKey:    pub,
+	}
+
+	respProc, err := cfg.ResponseProcessor(nil, ctx)
+	assert.NoError(t, err)
+
+	resp := &http.Response{
+		StatusCode: 401,
+		Body:       io.NopCloser(strings.NewReader(`{"message":"Bad credentials"}`)),
+		Header:     make(http.Header),
+	}
+
+	err = respProc(resp)
+	assert.NoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Contains(t, string(body), "Bad credentials")
+}
+
+func TestGitHubAppProcessorConfig_ResponseProcessor_NilContext(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	cfg := &GitHubAppProcessorConfig{
+		PrivateKey:     pemBytes,
+		AppID:          "123456",
+		InstallationID: "789012",
+	}
+
+	_, err := cfg.ResponseProcessor(nil, nil)
+	assert.Error(t, err)
+}
+
+func TestGitHubAppProcessorConfig_JSONRoundTrip(t *testing.T) {
+	_, pemBytes := generateTestRSAKey(t)
+
+	original := &Secret{
+		AuthConfig: NewBearerAuthConfig("trustno1"),
+		ProcessorConfig: &GitHubAppProcessorConfig{
+			PrivateKey:     pemBytes,
+			AppID:          "123456",
+			InstallationID: "789012",
+			TokenURL:       "https://api.github.com/app/installations/{installation_id}/access_tokens",
+		},
+		RequestValidators: []RequestValidator{AllowHosts("api.github.com")},
+	}
+
+	data, err := json.Marshal(original)
+	assert.NoError(t, err)
+
+	assert.Contains(t, string(data), "github_app_processor")
+
+	var restored Secret
+	err = json.Unmarshal(data, &restored)
+	assert.NoError(t, err)
+
+	ghCfg, ok := restored.ProcessorConfig.(*GitHubAppProcessorConfig)
+	assert.True(t, ok)
+	assert.Equal(t, pemBytes, ghCfg.PrivateKey)
+	assert.Equal(t, "123456", ghCfg.AppID)
+	assert.Equal(t, "789012", ghCfg.InstallationID)
+	assert.Equal(t, "https://api.github.com/app/installations/{installation_id}/access_tokens", ghCfg.TokenURL)
+}
+
 // unsealSecret is a test helper that decrypts a sealed secret.
 func unsealSecret(sealed string, pub *[32]byte, priv *[32]byte) (*Secret, error) {
 	ctSecret, err := base64.StdEncoding.DecodeString(sealed)
