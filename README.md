@@ -248,6 +248,59 @@ conn2.get("http://api.helpscout.net/v2/conversations")
 | `token_url` | yes | Token endpoint URL |
 | `scopes` | no | Space-separated OAuth2 scopes |
 
+### GitHub App processor
+
+The `github_app_processor` authenticates as a [GitHub App](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation). It follows the same two-step sealed pattern as `jwt_processor`, but with GitHub's non-standard flow: the JWT goes in the `Authorization` header (not a form body), the request body is empty, and the installation ID lives in the URL path. GitHub requires RSA keys signed with RS256; other key types are rejected.
+
+```ruby
+secret = {
+    github_app_processor: {
+        private_key: File.read("github-app-key.pem"),
+        app_id: "123456",
+        installation_id: "78901234",
+        # token_url: "https://api.github.com/app/installations/{installation_id}/access_tokens"  # default
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    },
+    allowed_hosts: ["api.github.com"]
+}
+```
+
+Step 1 - Exchange the sealed App key for a sealed installation token. POST to any path on `api.github.com` through tokenizer - the processor rewrites the path using the sealed `installation_id`:
+
+```ruby
+resp = conn.post("http://api.github.com/")
+sealed_installation_token = JSON.parse(resp.body)["sealed_token"]
+```
+
+The response body is replaced with:
+```json
+{"sealed_token": "<base64 sealed InjectProcessor>", "expires_in": 3540, "token_type": "sealed"}
+```
+
+Installation tokens expire after one hour. Repeat step 1 before expiry.
+
+Step 2 - Use the sealed installation token for API calls. Tokenizer injects `Authorization: token <installation_token>` and enforces that the token is only usable against `api.github.com`:
+
+```ruby
+conn2 = Faraday.new(
+    proxy: "http://tokenizer.flycast",
+    headers: {
+        proxy_tokenizer: "#{sealed_installation_token}",
+        proxy_authorization: "Bearer trustno1"
+    }
+)
+conn2.get("http://api.github.com/installation/repositories")
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `private_key` | yes | PEM-encoded RSA private key (sealed, never exposed) |
+| `app_id` | yes | GitHub App ID, used as the JWT `iss` claim |
+| `installation_id` | yes | Installation ID, substituted into `token_url` |
+| `token_url` | no | Token URL template; `{installation_id}` is substituted. Override for GitHub Enterprise. |
+
 ## Host allowlist
 
 If a client is fully compromised, the attacker could send encrypted secrets via tokenizer to a service that simply echoes back the request. This way, the attacker could learn the plaintext value of the secret. To mitigate against this, secrets can specify which hosts they may be used against.

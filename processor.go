@@ -99,6 +99,7 @@ type wireProcessor struct {
 	Sigv4ProcessorConfig             *Sigv4ProcessorConfig             `json:"sigv4_processor,omitempty"`
 	JWTProcessorConfig               *JWTProcessorConfig               `json:"jwt_processor,omitempty"`
 	ClientCredentialsProcessorConfig *ClientCredentialsProcessorConfig `json:"client_credentials_processor,omitempty"`
+	GitHubAppProcessorConfig         *GitHubAppProcessorConfig         `json:"github_app_processor,omitempty"`
 	MultiProcessorConfig             *MultiProcessorConfig             `json:"multi_processor,omitempty"`
 }
 
@@ -120,6 +121,8 @@ func newWireProcessor(p ProcessorConfig) (wireProcessor, error) {
 		return wireProcessor{JWTProcessorConfig: p}, nil
 	case *ClientCredentialsProcessorConfig:
 		return wireProcessor{ClientCredentialsProcessorConfig: p}, nil
+	case *GitHubAppProcessorConfig:
+		return wireProcessor{GitHubAppProcessorConfig: p}, nil
 	case *MultiProcessorConfig:
 		return wireProcessor{MultiProcessorConfig: p}, nil
 	default:
@@ -162,6 +165,10 @@ func (wp *wireProcessor) getProcessorConfig() (ProcessorConfig, error) {
 	if wp.ClientCredentialsProcessorConfig != nil {
 		np += 1
 		p = wp.ClientCredentialsProcessorConfig
+	}
+	if wp.GitHubAppProcessorConfig != nil {
+		np += 1
+		p = wp.GitHubAppProcessorConfig
 	}
 	if wp.MultiProcessorConfig != nil {
 		np += 1
@@ -848,6 +855,188 @@ func (c *ClientCredentialsProcessorConfig) StripHazmat() ProcessorConfig {
 		ClientSecret: redactedStr,
 		TokenURL:     c.TokenURL,
 		Scopes:       c.Scopes,
+	}
+}
+
+const (
+	defaultGitHubAppTokenURL    = "https://api.github.com/app/installations/{installation_id}/access_tokens"
+	githubAppHost               = "api.github.com"
+	githubAppInstallationIDTmpl = "{installation_id}"
+)
+
+// GitHubAppProcessorConfig signs a JWT for a GitHub App and exchanges it for
+// an installation access token. GitHub Apps use a bespoke flow (distinct from
+// RFC 7523): the JWT is placed in the Authorization header (not a form body),
+// the request body is empty, and the installation ID is in the URL path.
+// GitHub requires RSA keys signed with RS256; other key types are rejected.
+//
+// Like JWTProcessorConfig, this processor also transforms the response: it
+// parses GitHub's {"token": "ghs_...", "expires_at": "..."} reply, seals the
+// installation token into a new InjectProcessorConfig (pinned to
+// api.github.com with a `token %s` Authorization format), and replaces the
+// response body with a SealedTokenResponse. The private key, the signed JWT,
+// and the installation token are never visible to the caller.
+type GitHubAppProcessorConfig struct {
+	PrivateKey     []byte `json:"private_key"`     // PEM-encoded RSA private key
+	AppID          string `json:"app_id"`          // GitHub App ID (JWT "iss")
+	InstallationID string `json:"installation_id"` // substituted into TokenURL
+	TokenURL       string `json:"token_url"`       // template; default is GitHub's public endpoint
+}
+
+var _ ProcessorConfig = (*GitHubAppProcessorConfig)(nil)
+var _ ResponseProcessorConfig = (*GitHubAppProcessorConfig)(nil)
+
+func (c *GitHubAppProcessorConfig) tokenURL() string {
+	tmpl := c.TokenURL
+	if tmpl == "" {
+		tmpl = defaultGitHubAppTokenURL
+	}
+	return strings.ReplaceAll(tmpl, githubAppInstallationIDTmpl, c.InstallationID)
+}
+
+func (c *GitHubAppProcessorConfig) Processor(params map[string]string, _ *SealingContext) (RequestProcessor, error) {
+	if len(c.PrivateKey) == 0 {
+		return nil, errors.New("missing private key")
+	}
+	if c.AppID == "" {
+		return nil, errors.New("missing app_id")
+	}
+	if c.InstallationID == "" {
+		return nil, errors.New("missing installation_id")
+	}
+
+	block, _ := pem.Decode(c.PrivateKey)
+	if block == nil {
+		return nil, errors.New("invalid PEM-encoded private key")
+	}
+
+	var rsaKey *rsa.PrivateKey
+	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		rsaKey = k
+	} else if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		if rk, ok := k.(*rsa.PrivateKey); ok {
+			rsaKey = rk
+		} else {
+			return nil, errors.New("GitHub App requires an RSA private key")
+		}
+	} else {
+		return nil, fmt.Errorf("unsupported private key format: %w", err)
+	}
+
+	target, err := url.Parse(c.tokenURL())
+	if err != nil {
+		return nil, fmt.Errorf("invalid token_url: %w", err)
+	}
+	if target.Path == "" {
+		return nil, errors.New("token_url must include a path")
+	}
+
+	return func(r *http.Request) error {
+		now := time.Now()
+		claims := jwt.MapClaims{
+			"iss": c.AppID,
+			"iat": now.Unix(),
+			"exp": now.Add(10 * time.Minute).Unix(),
+		}
+
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(rsaKey)
+		if err != nil {
+			return fmt.Errorf("failed to sign JWT: %w", err)
+		}
+
+		r.Header.Set("Authorization", "Bearer "+signed)
+		r.Header.Set("Accept", "application/vnd.github+json")
+		r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		r.URL.Path = target.Path
+		r.URL.RawPath = target.RawPath
+
+		r.Body = http.NoBody
+		r.ContentLength = 0
+		r.Header.Del("Content-Type")
+
+		return nil
+	}, nil
+}
+
+func (c *GitHubAppProcessorConfig) ResponseProcessor(_ map[string]string, sctx *SealingContext) (func(*http.Response) error, error) {
+	if sctx == nil {
+		return nil, errors.New("github_app response processor requires a sealing context")
+	}
+
+	return func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			return nil
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read token response: %w", err)
+		}
+
+		var tokenResp struct {
+			Token     string    `json:"token"`
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			return fmt.Errorf("failed to parse token response: %w", err)
+		}
+
+		if tokenResp.Token == "" {
+			return errors.New("token response missing token")
+		}
+
+		// Installation tokens can only be replayed against api.github.com. Pin
+		// the sealed secret even if the outer secret didn't.
+		newSecret := &Secret{
+			AuthConfig: sctx.AuthConfig,
+			ProcessorConfig: &InjectProcessorConfig{
+				Token:        tokenResp.Token,
+				FmtProcessor: FmtProcessor{Fmt: "token %s"},
+			},
+			RequestValidators: []RequestValidator{AllowHosts(githubAppHost)},
+		}
+
+		sealed, err := newSecret.sealRaw(sctx.SealKey)
+		if err != nil {
+			return fmt.Errorf("failed to seal installation token: %w", err)
+		}
+
+		expiresIn := 3600
+		if !tokenResp.ExpiresAt.IsZero() {
+			if secs := int(time.Until(tokenResp.ExpiresAt).Seconds()); secs > 0 {
+				expiresIn = secs
+			}
+		}
+		if expiresIn > 60 {
+			expiresIn -= 60
+		}
+
+		sealedResp := SealedTokenResponse{
+			SealedToken: sealed,
+			ExpiresIn:   expiresIn,
+			TokenType:   "sealed",
+		}
+
+		respJSON, err := json.Marshal(sealedResp)
+		if err != nil {
+			return fmt.Errorf("failed to marshal sealed response: %w", err)
+		}
+
+		resp.Body = io.NopCloser(bytes.NewReader(respJSON))
+		resp.ContentLength = int64(len(respJSON))
+		resp.Header.Set("Content-Type", "application/json")
+
+		return nil
+	}, nil
+}
+
+func (c *GitHubAppProcessorConfig) StripHazmat() ProcessorConfig {
+	return &GitHubAppProcessorConfig{
+		PrivateKey:     redactedBase64,
+		AppID:          c.AppID,
+		InstallationID: c.InstallationID,
+		TokenURL:       c.TokenURL,
 	}
 }
 
