@@ -1387,7 +1387,7 @@ func TestGitHubAppProcessorConfig_ResponseProcessor_SealsInstallationToken(t *te
 	expiresAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	githubResp := fmt.Sprintf(`{"token":"ghs_installationtokenXYZ","expires_at":%q,"permissions":{"contents":"read"}}`, expiresAt)
 	resp := &http.Response{
-		StatusCode: 200,
+		StatusCode: 201,
 		Body:       io.NopCloser(strings.NewReader(githubResp)),
 		Header:     make(http.Header),
 	}
@@ -1446,7 +1446,7 @@ func TestGitHubAppProcessorConfig_ResponseProcessor_PinsToAPIHostWithoutOuterVal
 	expiresAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	githubResp := fmt.Sprintf(`{"token":"ghs_abc","expires_at":%q}`, expiresAt)
 	resp := &http.Response{
-		StatusCode: 200,
+		StatusCode: 201,
 		Body:       io.NopCloser(strings.NewReader(githubResp)),
 		Header:     make(http.Header),
 	}
@@ -1487,7 +1487,7 @@ func TestGitHubAppProcessorConfig_ResponseProcessor_MissingToken(t *testing.T) {
 	assert.NoError(t, err)
 
 	resp := &http.Response{
-		StatusCode: 200,
+		StatusCode: 201,
 		Body:       io.NopCloser(strings.NewReader(`{"not_token":"nope"}`)),
 		Header:     make(http.Header),
 	}

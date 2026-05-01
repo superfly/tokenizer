@@ -965,7 +965,9 @@ func (c *GitHubAppProcessorConfig) ResponseProcessor(_ map[string]string, sctx *
 	}
 
 	return func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
+		// GitHub's installation token endpoint returns 201 Created on success.
+		// https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app
+		if resp.StatusCode != http.StatusCreated {
 			return nil
 		}
 
