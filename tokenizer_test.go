@@ -179,6 +179,38 @@ func TestTokenizer(t *testing.T) {
 		assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	})
 
+	t.Run("inject processor query dst", func(t *testing.T) {
+		queryServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := w.Write([]byte(r.URL.RawQuery)); err != nil {
+				logrus.WithError(err).Panicf("failed writing response")
+			}
+		}))
+		defer queryServer.Close()
+		UpstreamTrust.AddCert(queryServer.Certificate())
+
+		qu, err := url.Parse(queryServer.URL)
+		assert.NoError(t, err)
+		qu.Scheme = "http"
+
+		auth := "trustno1"
+		token := "supersecret"
+		secret, err := (&Secret{AuthConfig: NewBearerAuthConfig(auth), ProcessorConfig: &InjectProcessorConfig{
+			Token:        token,
+			FmtProcessor: FmtProcessor{Fmt: "%s"},
+			DstProcessor: DstProcessor{Dst: "query:key"},
+		}}).Seal(sealKey)
+		assert.NoError(t, err)
+
+		client, err := Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+		assert.NoError(t, err)
+		resp, err := client.Get(qu.String() + "/lookup?foo=bar")
+		assert.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, "foo=bar&key="+token, string(body))
+	})
+
 	t.Run("inject hmac processor", func(t *testing.T) {
 		auth := "secreter"
 		key := []byte("trustno2")
