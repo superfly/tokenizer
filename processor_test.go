@@ -119,6 +119,62 @@ func TestDstProcessor(t *testing.T) {
 	assertResult("error", DstProcessor{Dst: "Foo", AllowedDst: []string{"Bar"}}, map[string]string{})
 	assertResult("error", DstProcessor{AllowedDst: []string{"Bar"}}, map[string]string{ParamDst: "Foo"})
 	assertResult("error", DstProcessor{Dst: "Bar"}, map[string]string{ParamDst: "Foo"})
+	assertResult("Foo: 123", DstProcessor{AllowedDst: []string{"Foo", "query:key"}}, map[string]string{ParamDst: "Foo"})
+}
+
+func TestDstProcessorQuery(t *testing.T) {
+	assertResult := func(expected string, dp DstProcessor, params map[string]string, rawQuery string) {
+		t.Helper()
+
+		u, err := url.Parse("https://api.example.com/path")
+		assert.NoError(t, err)
+		u.RawQuery = rawQuery
+
+		r := http.Request{Header: make(http.Header), URL: u}
+		err = dp.ApplyDst(params, &r, "123")
+		if expected == "error" {
+			assert.Error(t, err)
+		} else {
+			assert.NoError(t, err)
+			assert.Equal(t, expected, r.URL.RawQuery)
+			assert.Equal(t, 0, len(r.Header))
+		}
+	}
+
+	// sealed query dst applies without params
+	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "")
+	// existing query params are preserved
+	assertResult("foo=bar&key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "foo=bar")
+	// a param already present in the request is replaced, matched case
+	// insensitively, so the request can't carry a competing value alongside
+	// the injected one
+	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "key=evil")
+	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "KEY=evil")
+	assertResult("foo=bar&key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "Key=evil&foo=bar&kEy=evil2")
+	// the requester may name the sealed query dst explicitly
+	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{ParamDst: "query:key"}, "")
+	// allowlisted query dsts work, including as the default (first) entry
+	assertResult("key=123", DstProcessor{AllowedDst: []string{"query:key"}}, map[string]string{ParamDst: "query:key"}, "")
+	assertResult("key=123", DstProcessor{AllowedDst: []string{"query:key"}}, map[string]string{}, "")
+	assertResult("key=123", DstProcessor{AllowedDst: []string{"Foo", "query:key"}}, map[string]string{ParamDst: "query:key"}, "")
+	// an unsealed dst leaves the destination up to the requester, as with headers
+	assertResult("key=123", DstProcessor{}, map[string]string{ParamDst: "query:key"}, "")
+	// query param names are case sensitive
+	assertResult("error", DstProcessor{Dst: "query:key"}, map[string]string{ParamDst: "query:Key"}, "")
+	assertResult("error", DstProcessor{AllowedDst: []string{"query:key"}}, map[string]string{ParamDst: "query:other"}, "")
+	// header and query dsts are separate namespaces
+	assertResult("error", DstProcessor{Dst: "Authorization"}, map[string]string{ParamDst: "query:Authorization"}, "")
+	assertResult("error", DstProcessor{Dst: "query:Foo"}, map[string]string{ParamDst: "Foo"}, "")
+	// the param name is required
+	assertResult("error", DstProcessor{Dst: "query:"}, map[string]string{}, "")
+	assertResult("error", DstProcessor{}, map[string]string{ParamDst: "query:"}, "")
+
+	// values are URL-encoded
+	u, err := url.Parse("https://api.example.com/path")
+	assert.NoError(t, err)
+	r := http.Request{Header: make(http.Header), URL: u}
+	assert.NoError(t, DstProcessor{Dst: "query:key"}.ApplyDst(map[string]string{}, &r, "a b&c"))
+	assert.Equal(t, "key=a+b%26c", r.URL.RawQuery)
 }
 
 func TestInjectBodyProcessorConfig(t *testing.T) {

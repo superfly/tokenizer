@@ -1181,7 +1181,21 @@ type DstProcessor struct {
 	AllowedDst []string `json:"allowed_dst,omitempty"`
 }
 
-// Apply the specified val to the correct destination header in the request.
+// Dsts of the form "query:<param>" target a URL query parameter instead of a
+// header.
+const dstQueryPrefix = "query:"
+
+// Canonicalize a dst for comparison. Header names are case insensitive, but
+// query parameter names are matched exactly.
+func canonicalDst(dst string) string {
+	if strings.HasPrefix(dst, dstQueryPrefix) {
+		return dst
+	}
+	return textproto.CanonicalMIMEHeaderKey(dst)
+}
+
+// Apply the specified val to the correct destination header or query
+// parameter in the request.
 func (fp DstProcessor) ApplyDst(params map[string]string, r *http.Request, val string) error {
 	dst, hasParam := params[ParamDst]
 
@@ -1197,16 +1211,16 @@ func (fp DstProcessor) ApplyDst(params map[string]string, r *http.Request, val s
 		dst = "Authorization"
 	}
 
-	dst = textproto.CanonicalMIMEHeaderKey(dst)
+	dst = canonicalDst(dst)
 
 	// check if param is allowed
-	if fp.Dst != "" && dst != textproto.CanonicalMIMEHeaderKey(fp.Dst) {
+	if fp.Dst != "" && dst != canonicalDst(fp.Dst) {
 		return errors.New("bad dst")
 	}
 	if fp.AllowedDst != nil {
 		var found bool
 		for _, a := range fp.AllowedDst {
-			if dst == textproto.CanonicalMIMEHeaderKey(a) {
+			if dst == canonicalDst(a) {
 				found = true
 				break
 			}
@@ -1214,6 +1228,24 @@ func (fp DstProcessor) ApplyDst(params map[string]string, r *http.Request, val s
 		if !found {
 			return errors.New("bad dst")
 		}
+	}
+
+	if param, ok := strings.CutPrefix(dst, dstQueryPrefix); ok {
+		if param == "" {
+			return errors.New("bad dst")
+		}
+		q := r.URL.Query()
+		// strip any existing occurrence of the param, matched case
+		// insensitively, so the request can't carry a competing value
+		// alongside the injected one
+		for k := range q {
+			if strings.EqualFold(k, param) {
+				delete(q, k)
+			}
+		}
+		q.Set(param, val)
+		r.URL.RawQuery = q.Encode()
+		return nil
 	}
 
 	r.Header.Set(dst, val)

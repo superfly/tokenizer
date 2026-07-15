@@ -75,6 +75,23 @@ This will result in the header getting injected like this:
 X-Stripe-Token: token=my-stripe-api-key
 ```
 
+The destination can also be a URL query parameter using the `query:<param>` form, for APIs that only accept credentials in the query string:
+
+```ruby
+secret = {
+    inject_processor: {
+        token: "my-api-token",
+        dst:   "query:key",
+        fmt:   "%s",
+    },
+    bearer_auth: {
+        digest: Digest::SHA256.base64digest('trustno1')
+    }
+}
+```
+
+This appends `key=my-api-token` to the request's query string, preserving any other query parameters. If the request already carries a parameter with the same name (compared case insensitively), it is replaced. Unlike header names, query parameter names in `dst`/`allowed_dst` are matched case sensitively. Note that query strings are more likely than headers to end up in server access logs. If `dst` is left unsealed, the client chooses the destination per request, meaning any client of the secret can opt it into a query string and its associated log exposure. Seal `dst` so that choice rests with the secret's creator.
+
 Aside from `inject_processor`, we also have `inject_hmac_processor`. This creates an HMAC signatures using the key stored in the encrypted secret and injects that into a request header. The hash algorithm can be specified in the secret under the key `hash` and defaults to SHA256. This processor signs the verbatim request body by default, but can sign custom messages specified in the `msg` parameter in the `Proxy-Tokenizer` header (see about parameters bellow). This processor also respects the `dst` and `fmt` options.
 
 ```ruby
