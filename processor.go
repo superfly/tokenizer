@@ -1235,6 +1235,14 @@ func (fp DstProcessor) ApplyDst(params map[string]string, r *http.Request, val s
 			return errors.New("bad dst")
 		}
 		q := r.URL.Query()
+		// strip any existing occurrence of the param, matched case
+		// insensitively, so the request can't carry a competing value
+		// alongside the injected one
+		for k := range q {
+			if strings.EqualFold(k, param) {
+				delete(q, k)
+			}
+		}
 		q.Set(param, val)
 		r.URL.RawQuery = q.Encode()
 		return nil

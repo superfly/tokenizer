@@ -145,6 +145,12 @@ func TestDstProcessorQuery(t *testing.T) {
 	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "")
 	// existing query params are preserved
 	assertResult("foo=bar&key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "foo=bar")
+	// a param already present in the request is replaced, matched case
+	// insensitively, so the request can't carry a competing value alongside
+	// the injected one
+	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "key=evil")
+	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "KEY=evil")
+	assertResult("foo=bar&key=123", DstProcessor{Dst: "query:key"}, map[string]string{}, "Key=evil&foo=bar&kEy=evil2")
 	// the requester may name the sealed query dst explicitly
 	assertResult("key=123", DstProcessor{Dst: "query:key"}, map[string]string{ParamDst: "query:key"}, "")
 	// allowlisted query dsts work, including as the default (first) entry
