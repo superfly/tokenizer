@@ -51,6 +51,10 @@ type tokenizer struct {
 	// RequireFlySrc will reject requests without a fly-src when set.
 	RequireFlySrc bool
 
+	// allowPrivateUpstreams disables the denial of private, loopback, and
+	// fdaa::/8 upstream addresses. Only for tests.
+	allowPrivateUpstreams bool
+
 	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
 	// If provided, this allows tokenizer to transparently proxy requests (ie.
 	// accept normal HTTP requests with arbitrary hostnames) while blocking
@@ -74,6 +78,14 @@ type Option func(*tokenizer)
 func OpenProxy() Option {
 	return func(t *tokenizer) {
 		t.OpenProxy = true
+	}
+}
+
+// AllowPrivateUpstreams permits dialing private, loopback, and fdaa::/8
+// upstream addresses. Only for tests that run their upstream on loopback.
+func AllowPrivateUpstreams() Option {
+	return func(t *tokenizer) {
+		t.allowPrivateUpstreams = true
 	}
 }
 
@@ -176,7 +188,7 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	})
 
 	proxy.Tr = &http.Transport{
-		Dial: dialFunc(tkz.tokenizerHostnames),
+		Dial: dialFunc(tkz.tokenizerHostnames, tkz.allowPrivateUpstreams),
 		// probably not necessary, but I don't want to worry about desync/smuggling
 		DisableKeepAlives: true,
 	}
@@ -491,13 +503,15 @@ func errorResponse(err error) *http.Response {
 
 // dialFunc returns a function for dialing network addresses. Ours does a few
 // special things.
+//   - It denies connections to private, loopback, and fdaa::/8 addresses
+//     unless allowPrivate is set.
 //   - It denies connections to the given set of IP addresses. This is to prevent
 //     circular requests back to tokenizer. Invalid IPs are ignored.
 //   - It rejects requests for TLS upstreams. We need to see/modify requests, so
 //     our proxy can't do passthrough TLS.
 //   - It forces the upstream connection to be TLS. We want the actual upstream
 //     connection to be over TLS because security.
-func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
+func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Conn, error) {
 	_, fdaaNet, err := net.ParseCIDR("fdaa::/8")
 	if err != nil {
 		panic(err)
@@ -512,27 +526,27 @@ func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
 		}
 	}
 
-	if len(baMap) != 0 {
-		netDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
-			h, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
+	netDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		h, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
 
-			switch ip := net.ParseIP(h); {
-			case ip == nil:
-				return fmt.Errorf("bad ip: %s", address)
-			case ip.IsPrivate():
-				return fmt.Errorf("%w: dialing private address %s denied", ErrBadRequest, address)
-			case ip.IsLoopback():
-				return fmt.Errorf("%w: dialing loopback address %s denied", ErrBadRequest, address)
-			case fdaaNet.Contains(ip):
-				return fmt.Errorf("%w: dialing fdaa::/8 address %s denied", ErrBadRequest, address)
-			case baMap[ip.String()]:
-				return fmt.Errorf("%w: dialing address %s denied", ErrBadRequest, address)
-			default:
-				return nil
-			}
+		switch ip := net.ParseIP(h); {
+		case ip == nil:
+			return fmt.Errorf("bad ip: %s", address)
+		case baMap[ip.String()]:
+			return fmt.Errorf("%w: dialing address %s denied", ErrBadRequest, address)
+		case allowPrivate:
+			return nil
+		case ip.IsPrivate():
+			return fmt.Errorf("%w: dialing private address %s denied", ErrBadRequest, address)
+		case ip.IsLoopback():
+			return fmt.Errorf("%w: dialing loopback address %s denied", ErrBadRequest, address)
+		case fdaaNet.Contains(ip):
+			return fmt.Errorf("%w: dialing fdaa::/8 address %s denied", ErrBadRequest, address)
+		default:
+			return nil
 		}
 	}
 

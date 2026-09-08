@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -64,7 +65,7 @@ func TestTokenizer(t *testing.T) {
 	tkz := NewTokenizer(openKey)
 	assert.True(t, tkz != nil)
 
-	tkz = NewTokenizer(openKey, WithFlysrcParser(flysrcParser))
+	tkz = NewTokenizer(openKey, WithFlysrcParser(flysrcParser), AllowPrivateUpstreams())
 	tkz.ProxyHttpServer.Verbose = true
 
 	tkzServer := httptest.NewServer(tkz)
@@ -729,7 +730,7 @@ func TestJWTProcessorE2E(t *testing.T) {
 	echoURL.Scheme = "http"
 	echoHost := echoURL.Host
 
-	tkz := NewTokenizer(openKey)
+	tkz := NewTokenizer(openKey, AllowPrivateUpstreams())
 	tkzServer := httptest.NewServer(tkz)
 	defer tkzServer.Close()
 
@@ -806,4 +807,32 @@ func TestJWTProcessorE2E(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	t.Log("Step 2b OK: wrong auth correctly rejected")
+}
+
+func TestDialFuncDeniesInternalAddresses(t *testing.T) {
+	cases := []struct {
+		name         string
+		badAddrs     []string
+		allowPrivate bool
+		addr         string
+	}{
+		{"loopback without bad addrs", nil, false, "127.0.0.1:1"},
+		{"private without bad addrs", nil, false, "10.0.0.1:1"},
+		{"fdaa without bad addrs", nil, false, "[fdaa::1]:1"},
+		{"loopback with bad addrs", []string{"203.0.113.5"}, false, "127.0.0.1:1"},
+		{"bad addr", []string{"203.0.113.5"}, false, "203.0.113.5:1"},
+		{"bad addr with private allowed", []string{"203.0.113.5"}, true, "203.0.113.5:1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := dialFunc(tc.badAddrs, tc.allowPrivate)("tcp", tc.addr)
+			assert.True(t, errors.Is(err, ErrBadRequest), "got %v", err)
+		})
+	}
+
+	// loopback reaches the network when private upstreams are allowed
+	_, err := dialFunc(nil, true)("tcp", "127.0.0.1:1")
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, ErrBadRequest), "got %v", err)
 }
