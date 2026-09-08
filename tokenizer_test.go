@@ -139,10 +139,13 @@ func TestTokenizer(t *testing.T) {
 			Body:    "",
 		}, doEcho(t, client, req))
 
-		// CONNECT proxy
+		// CONNECT is rejected. The allowed_hosts validator checks the Host
+		// header, but a tunneled request is written to whatever the CONNECT
+		// line named, so honoring CONNECT would let a client aim a host-scoped
+		// secret at a different host.
 		conn, err := net.Dial("tcp", tkzServer.Listener.Addr().String())
-		connreader := bufio.NewReader(conn)
 		assert.NoError(t, err)
+		connreader := bufio.NewReader(conn)
 		creq, err := http.NewRequest(http.MethodConnect, appURL, nil)
 		assert.NoError(t, err)
 		opts := clientOptions{}
@@ -152,14 +155,8 @@ func TestTokenizer(t *testing.T) {
 		assert.NoError(t, creq.Write(conn))
 		resp, err = http.ReadResponse(connreader, creq)
 		assert.NoError(t, err)
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-		// request via CONNECT proxy
-		client = &http.Client{Transport: &http.Transport{Dial: func(network, addr string) (net.Conn, error) { return conn, nil }}}
-		assert.Equal(t, &echoResponse{
-			Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", token)}},
-			Body:    "",
-		}, doEcho(t, client, req))
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.NoError(t, conn.Close())
 
 		// good auth + bad auth
 		client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil), WithAuth("bogus"))

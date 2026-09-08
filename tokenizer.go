@@ -195,61 +195,24 @@ func (t *tokenizer) SealKey() string {
 
 // data that we can pass around between callbacks
 type proxyUserData struct {
-	// processors from our handling of the initial CONNECT request if this is a
-	// tunneled connection.
-	connectProcessors []RequestProcessor
-
 	// responseProcessors are invoked in HandleResponse to transform the
 	// upstream response before returning it to the caller. Currently only
 	// JWTProcessorConfig uses this to seal the access token.
 	responseProcessors []func(*http.Response) error
 
-	// start time of the CONNECT request if this is a tunneled connection.
-	connectStart time.Time
-	connLog      logrus.FieldLogger
-
-	// start time of the current request. gets reset between requests within a
-	// tunneled connection.
+	// start time of the current request.
 	requestStart time.Time
 	reqLog       logrus.FieldLogger
 }
 
-// HandleConnect implements goproxy.FuncHttpsHandler
+// HandleConnect implements goproxy.FuncHttpsHandler. CONNECT is refused:
+// request validators check the Host header, but a tunneled request is
+// delivered to whatever the CONNECT line named, so honoring CONNECT would let
+// a client use a host-scoped secret against a different host.
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-	logger := logrus.WithField("connect_host", host)
-	logger = logger.WithFields(reqLogFields(ctx.Req))
-	if host == "" {
-		logger.Warn("no host in CONNECT request")
-		ctx.Resp = errorResponse(ErrBadRequest)
-		return goproxy.RejectConnect, ""
-	}
-
-	pud := &proxyUserData{
-		connLog:      logger,
-		connectStart: time.Now(),
-	}
-
-	_, port, _ := strings.Cut(host, ":")
-	if port == "443" {
-		pud.connLog.Warn("attempt to proxy to https downstream")
-		ctx.Resp = errorResponse(ErrBadRequest)
-		return goproxy.RejectConnect, ""
-	}
-
-	connResult, err := t.processorsFromRequest(ctx.Req)
-	if len(connResult.safeSecrets) > 0 {
-		pud.connLog = pud.connLog.WithField("secrets", connResult.safeSecrets)
-	}
-	if err != nil {
-		pud.connLog.WithError(err).Warn("find processor (CONNECT)")
-		ctx.Resp = errorResponse(err)
-		return goproxy.RejectConnect, ""
-	}
-
-	pud.connectProcessors = connResult.request
-	ctx.UserData = pud
-
-	return goproxy.HTTPMitmConnect, host
+	logrus.WithField("connect_host", host).WithFields(reqLogFields(ctx.Req)).Warn("CONNECT not supported")
+	ctx.Resp = errorResponse(ErrBadRequest)
+	return goproxy.RejectConnect, ""
 }
 
 func getSource(req *http.Request) string {
@@ -285,11 +248,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 	}
 
 	pud.requestStart = time.Now()
-	if pud.connLog != nil {
-		pud.reqLog = pud.connLog
-	} else {
-		pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
-	}
+	pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
 
 	if t.flysrcParser != nil {
 		src, err := t.flysrcParser.FromRequest(req)
@@ -308,7 +267,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		}
 	}
 
-	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
+	var processors []RequestProcessor
 	reqResult, err := t.processorsFromRequest(req)
 	if len(reqResult.safeSecrets) > 0 {
 		pud.reqLog = pud.reqLog.WithField("secrets", reqResult.safeSecrets)
@@ -360,10 +319,6 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 	}
 
 	log := pud.reqLog.WithField("durMS", int64(time.Since(pud.requestStart)/time.Millisecond))
-
-	if !pud.connectStart.IsZero() {
-		log = log.WithField("connDurMS", int64(time.Since(pud.connectStart)/time.Millisecond))
-	}
 	if resp != nil {
 		log = log.WithField("status", resp.StatusCode)
 		resp.Header.Set("Connection", "close")
@@ -377,7 +332,7 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 		}
 	}
 
-	// reset pud for next request in tunnel
+	// reset pud
 	pud.requestStart = time.Time{}
 	pud.reqLog = nil
 	pud.responseProcessors = nil
