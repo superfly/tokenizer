@@ -51,6 +51,10 @@ type tokenizer struct {
 	// RequireFlySrc will reject requests without a fly-src when set.
 	RequireFlySrc bool
 
+	// allowPrivateUpstreams disables the denial of private, loopback, and
+	// fdaa::/8 upstream addresses. Only for tests.
+	allowPrivateUpstreams bool
+
 	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
 	// If provided, this allows tokenizer to transparently proxy requests (ie.
 	// accept normal HTTP requests with arbitrary hostnames) while blocking
@@ -74,6 +78,14 @@ type Option func(*tokenizer)
 func OpenProxy() Option {
 	return func(t *tokenizer) {
 		t.OpenProxy = true
+	}
+}
+
+// AllowPrivateUpstreams permits dialing private, loopback, and fdaa::/8
+// upstream addresses. Only for tests that run their upstream on loopback.
+func AllowPrivateUpstreams() Option {
+	return func(t *tokenizer) {
+		t.allowPrivateUpstreams = true
 	}
 }
 
@@ -176,7 +188,7 @@ func NewTokenizer(openKey string, opts ...Option) *tokenizer {
 	})
 
 	proxy.Tr = &http.Transport{
-		Dial: dialFunc(tkz.tokenizerHostnames),
+		Dial: dialFunc(tkz.tokenizerHostnames, tkz.allowPrivateUpstreams),
 		// probably not necessary, but I don't want to worry about desync/smuggling
 		DisableKeepAlives: true,
 	}
@@ -195,61 +207,24 @@ func (t *tokenizer) SealKey() string {
 
 // data that we can pass around between callbacks
 type proxyUserData struct {
-	// processors from our handling of the initial CONNECT request if this is a
-	// tunneled connection.
-	connectProcessors []RequestProcessor
-
 	// responseProcessors are invoked in HandleResponse to transform the
 	// upstream response before returning it to the caller. Currently only
 	// JWTProcessorConfig uses this to seal the access token.
 	responseProcessors []func(*http.Response) error
 
-	// start time of the CONNECT request if this is a tunneled connection.
-	connectStart time.Time
-	connLog      logrus.FieldLogger
-
-	// start time of the current request. gets reset between requests within a
-	// tunneled connection.
+	// start time of the current request.
 	requestStart time.Time
 	reqLog       logrus.FieldLogger
 }
 
-// HandleConnect implements goproxy.FuncHttpsHandler
+// HandleConnect implements goproxy.FuncHttpsHandler. CONNECT is refused:
+// request validators check the Host header, but a tunneled request is
+// delivered to whatever the CONNECT line named, so honoring CONNECT would let
+// a client use a host-scoped secret against a different host.
 func (t *tokenizer) HandleConnect(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-	logger := logrus.WithField("connect_host", host)
-	logger = logger.WithFields(reqLogFields(ctx.Req))
-	if host == "" {
-		logger.Warn("no host in CONNECT request")
-		ctx.Resp = errorResponse(ErrBadRequest)
-		return goproxy.RejectConnect, ""
-	}
-
-	pud := &proxyUserData{
-		connLog:      logger,
-		connectStart: time.Now(),
-	}
-
-	_, port, _ := strings.Cut(host, ":")
-	if port == "443" {
-		pud.connLog.Warn("attempt to proxy to https downstream")
-		ctx.Resp = errorResponse(ErrBadRequest)
-		return goproxy.RejectConnect, ""
-	}
-
-	connResult, err := t.processorsFromRequest(ctx.Req)
-	if len(connResult.safeSecrets) > 0 {
-		pud.connLog = pud.connLog.WithField("secrets", connResult.safeSecrets)
-	}
-	if err != nil {
-		pud.connLog.WithError(err).Warn("find processor (CONNECT)")
-		ctx.Resp = errorResponse(err)
-		return goproxy.RejectConnect, ""
-	}
-
-	pud.connectProcessors = connResult.request
-	ctx.UserData = pud
-
-	return goproxy.HTTPMitmConnect, host
+	logrus.WithField("connect_host", host).WithFields(reqLogFields(ctx.Req)).Warn("CONNECT not supported")
+	ctx.Resp = errorResponse(ErrBadRequest)
+	return goproxy.RejectConnect, ""
 }
 
 func getSource(req *http.Request) string {
@@ -285,11 +260,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 	}
 
 	pud.requestStart = time.Now()
-	if pud.connLog != nil {
-		pud.reqLog = pud.connLog
-	} else {
-		pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
-	}
+	pud.reqLog = logrus.WithFields(reqLogFields(ctx.Req))
 
 	if t.flysrcParser != nil {
 		src, err := t.flysrcParser.FromRequest(req)
@@ -308,7 +279,7 @@ func (t *tokenizer) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*ht
 		}
 	}
 
-	processors := append([]RequestProcessor(nil), pud.connectProcessors...)
+	var processors []RequestProcessor
 	reqResult, err := t.processorsFromRequest(req)
 	if len(reqResult.safeSecrets) > 0 {
 		pud.reqLog = pud.reqLog.WithField("secrets", reqResult.safeSecrets)
@@ -360,10 +331,6 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 	}
 
 	log := pud.reqLog.WithField("durMS", int64(time.Since(pud.requestStart)/time.Millisecond))
-
-	if !pud.connectStart.IsZero() {
-		log = log.WithField("connDurMS", int64(time.Since(pud.connectStart)/time.Millisecond))
-	}
 	if resp != nil {
 		log = log.WithField("status", resp.StatusCode)
 		resp.Header.Set("Connection", "close")
@@ -377,7 +344,7 @@ func (t *tokenizer) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *
 		}
 	}
 
-	// reset pud for next request in tunnel
+	// reset pud
 	pud.requestStart = time.Time{}
 	pud.reqLog = nil
 	pud.responseProcessors = nil
@@ -536,13 +503,15 @@ func errorResponse(err error) *http.Response {
 
 // dialFunc returns a function for dialing network addresses. Ours does a few
 // special things.
+//   - It denies connections to private, loopback, and fdaa::/8 addresses
+//     unless allowPrivate is set.
 //   - It denies connections to the given set of IP addresses. This is to prevent
 //     circular requests back to tokenizer. Invalid IPs are ignored.
 //   - It rejects requests for TLS upstreams. We need to see/modify requests, so
 //     our proxy can't do passthrough TLS.
 //   - It forces the upstream connection to be TLS. We want the actual upstream
 //     connection to be over TLS because security.
-func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
+func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Conn, error) {
 	_, fdaaNet, err := net.ParseCIDR("fdaa::/8")
 	if err != nil {
 		panic(err)
@@ -557,27 +526,27 @@ func dialFunc(badAddrs []string) func(string, string) (net.Conn, error) {
 		}
 	}
 
-	if len(baMap) != 0 {
-		netDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
-			h, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
+	netDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		h, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
 
-			switch ip := net.ParseIP(h); {
-			case ip == nil:
-				return fmt.Errorf("bad ip: %s", address)
-			case ip.IsPrivate():
-				return fmt.Errorf("%w: dialing private address %s denied", ErrBadRequest, address)
-			case ip.IsLoopback():
-				return fmt.Errorf("%w: dialing loopback address %s denied", ErrBadRequest, address)
-			case fdaaNet.Contains(ip):
-				return fmt.Errorf("%w: dialing fdaa::/8 address %s denied", ErrBadRequest, address)
-			case baMap[ip.String()]:
-				return fmt.Errorf("%w: dialing address %s denied", ErrBadRequest, address)
-			default:
-				return nil
-			}
+		switch ip := net.ParseIP(h); {
+		case ip == nil:
+			return fmt.Errorf("bad ip: %s", address)
+		case baMap[ip.String()]:
+			return fmt.Errorf("%w: dialing address %s denied", ErrBadRequest, address)
+		case allowPrivate:
+			return nil
+		case ip.IsPrivate():
+			return fmt.Errorf("%w: dialing private address %s denied", ErrBadRequest, address)
+		case ip.IsLoopback():
+			return fmt.Errorf("%w: dialing loopback address %s denied", ErrBadRequest, address)
+		case fdaaNet.Contains(ip):
+			return fmt.Errorf("%w: dialing fdaa::/8 address %s denied", ErrBadRequest, address)
+		default:
+			return nil
 		}
 	}
 

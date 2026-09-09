@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -64,7 +65,7 @@ func TestTokenizer(t *testing.T) {
 	tkz := NewTokenizer(openKey)
 	assert.True(t, tkz != nil)
 
-	tkz = NewTokenizer(openKey, WithFlysrcParser(flysrcParser))
+	tkz = NewTokenizer(openKey, WithFlysrcParser(flysrcParser), AllowPrivateUpstreams())
 	tkz.ProxyHttpServer.Verbose = true
 
 	tkzServer := httptest.NewServer(tkz)
@@ -139,10 +140,13 @@ func TestTokenizer(t *testing.T) {
 			Body:    "",
 		}, doEcho(t, client, req))
 
-		// CONNECT proxy
+		// CONNECT is rejected. The allowed_hosts validator checks the Host
+		// header, but a tunneled request is written to whatever the CONNECT
+		// line named, so honoring CONNECT would let a client aim a host-scoped
+		// secret at a different host.
 		conn, err := net.Dial("tcp", tkzServer.Listener.Addr().String())
-		connreader := bufio.NewReader(conn)
 		assert.NoError(t, err)
+		connreader := bufio.NewReader(conn)
 		creq, err := http.NewRequest(http.MethodConnect, appURL, nil)
 		assert.NoError(t, err)
 		opts := clientOptions{}
@@ -152,14 +156,8 @@ func TestTokenizer(t *testing.T) {
 		assert.NoError(t, creq.Write(conn))
 		resp, err = http.ReadResponse(connreader, creq)
 		assert.NoError(t, err)
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-		// request via CONNECT proxy
-		client = &http.Client{Transport: &http.Transport{Dial: func(network, addr string) (net.Conn, error) { return conn, nil }}}
-		assert.Equal(t, &echoResponse{
-			Headers: http.Header{"Authorization": {fmt.Sprintf("Bearer %s", token)}},
-			Body:    "",
-		}, doEcho(t, client, req))
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.NoError(t, conn.Close())
 
 		// good auth + bad auth
 		client, err = Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil), WithAuth("bogus"))
@@ -732,7 +730,7 @@ func TestJWTProcessorE2E(t *testing.T) {
 	echoURL.Scheme = "http"
 	echoHost := echoURL.Host
 
-	tkz := NewTokenizer(openKey)
+	tkz := NewTokenizer(openKey, AllowPrivateUpstreams())
 	tkzServer := httptest.NewServer(tkz)
 	defer tkzServer.Close()
 
@@ -809,4 +807,32 @@ func TestJWTProcessorE2E(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusProxyAuthRequired, resp.StatusCode)
 	t.Log("Step 2b OK: wrong auth correctly rejected")
+}
+
+func TestDialFuncDeniesInternalAddresses(t *testing.T) {
+	cases := []struct {
+		name         string
+		badAddrs     []string
+		allowPrivate bool
+		addr         string
+	}{
+		{"loopback without bad addrs", nil, false, "127.0.0.1:1"},
+		{"private without bad addrs", nil, false, "10.0.0.1:1"},
+		{"fdaa without bad addrs", nil, false, "[fdaa::1]:1"},
+		{"loopback with bad addrs", []string{"203.0.113.5"}, false, "127.0.0.1:1"},
+		{"bad addr", []string{"203.0.113.5"}, false, "203.0.113.5:1"},
+		{"bad addr with private allowed", []string{"203.0.113.5"}, true, "203.0.113.5:1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := dialFunc(tc.badAddrs, tc.allowPrivate)("tcp", tc.addr)
+			assert.True(t, errors.Is(err, ErrBadRequest), "got %v", err)
+		})
+	}
+
+	// loopback reaches the network when private upstreams are allowed
+	_, err := dialFunc(nil, true)("tcp", "127.0.0.1:1")
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, ErrBadRequest), "got %v", err)
 }
