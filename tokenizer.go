@@ -51,8 +51,8 @@ type tokenizer struct {
 	// RequireFlySrc will reject requests without a fly-src when set.
 	RequireFlySrc bool
 
-	// allowPrivateUpstreams disables the denial of private, loopback, and
-	// fdaa::/8 upstream addresses. Only for tests.
+	// allowPrivateUpstreams disables the denial of private, loopback,
+	// unspecified, link-local, and fdaa::/8 upstream addresses. Only for tests.
 	allowPrivateUpstreams bool
 
 	// tokenizerHostnames is a list of hostnames where tokenizer can be reached.
@@ -81,8 +81,9 @@ func OpenProxy() Option {
 	}
 }
 
-// AllowPrivateUpstreams permits dialing private, loopback, and fdaa::/8
-// upstream addresses. Only for tests that run their upstream on loopback.
+// AllowPrivateUpstreams permits dialing private, loopback, unspecified,
+// link-local, and fdaa::/8 upstream addresses. Only for tests that run their
+// upstream on loopback.
 func AllowPrivateUpstreams() Option {
 	return func(t *tokenizer) {
 		t.allowPrivateUpstreams = true
@@ -503,8 +504,8 @@ func errorResponse(err error) *http.Response {
 
 // dialFunc returns a function for dialing network addresses. Ours does a few
 // special things.
-//   - It denies connections to private, loopback, and fdaa::/8 addresses
-//     unless allowPrivate is set.
+//   - It denies connections to private, loopback, unspecified, link-local, and
+//     fdaa::/8 addresses unless allowPrivate is set.
 //   - It denies connections to the given set of IP addresses. This is to prevent
 //     circular requests back to tokenizer. Invalid IPs are ignored.
 //   - It rejects requests for TLS upstreams. We need to see/modify requests, so
@@ -543,6 +544,10 @@ func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Co
 			return fmt.Errorf("%w: dialing private address %s denied", ErrBadRequest, address)
 		case ip.IsLoopback():
 			return fmt.Errorf("%w: dialing loopback address %s denied", ErrBadRequest, address)
+		case ip.IsUnspecified():
+			return fmt.Errorf("%w: dialing unspecified address %s denied", ErrBadRequest, address)
+		case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(), ip.IsInterfaceLocalMulticast():
+			return fmt.Errorf("%w: dialing link-local address %s denied", ErrBadRequest, address)
 		case fdaaNet.Contains(ip):
 			return fmt.Errorf("%w: dialing fdaa::/8 address %s denied", ErrBadRequest, address)
 		default:
