@@ -821,6 +821,11 @@ func TestDialFuncDeniesInternalAddresses(t *testing.T) {
 		{"fdaa without bad addrs", nil, false, "[fdaa::1]:1"},
 		{"loopback with bad addrs", []string{"203.0.113.5"}, false, "127.0.0.1:1"},
 		{"bad addr", []string{"203.0.113.5"}, false, "203.0.113.5:1"},
+		{"link-local v4", nil, false, "169.254.169.254:1"},
+		{"link-local v6", nil, false, "[fe80::1]:1"},
+		{"unspecified v4", nil, false, "0.0.0.0:1"},
+		{"unspecified v6", nil, false, "[::]:1"},
+		{"ipv4-mapped loopback", nil, false, "[::ffff:127.0.0.1]:1"},
 		{"bad addr with private allowed", []string{"203.0.113.5"}, true, "203.0.113.5:1"},
 	}
 
