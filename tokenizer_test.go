@@ -841,3 +841,89 @@ func TestDialFuncDeniesInternalAddresses(t *testing.T) {
 	assert.Error(t, err)
 	assert.False(t, errors.Is(err, ErrBadRequest), "got %v", err)
 }
+
+func TestDialFuncParsesAddresses(t *testing.T) {
+	refused := []struct {
+		name string
+		addr string
+		msg  string
+	}{
+		{"https port", "example.com:443", "proxied request must be HTTP"},
+		{"ipv6 literal https port", "[::1]:443", "proxied request must be HTTP"},
+		{"empty host", ":80", "without host"},
+		{"empty ipv6 host", "[]:80", "without host"},
+		{"empty address", "", "without host"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := dialFunc(nil, true)("tcp", tc.addr)
+			assert.True(t, errors.Is(err, ErrBadRequest), "got %v", err)
+			assert.Contains(t, err.Error(), tc.msg)
+		})
+	}
+
+	// Port 80, or no port, is dialed as 443 with the host intact. Nothing
+	// listens there, so the error names the address that was dialed.
+	for _, tc := range []struct{ addr, dialed string }{
+		{"127.0.0.1:80", "127.0.0.1:443"},
+		{"127.0.0.1", "127.0.0.1:443"},
+		{"127.0.0.1:", "127.0.0.1:443"},
+		{"[::1]:80", "[::1]:443"},
+		{"[::1]", "[::1]:443"},
+		{"[::1]:", "[::1]:443"},
+	} {
+		t.Run("default port "+tc.addr, func(t *testing.T) {
+			_, err := dialFunc(nil, true)("tcp", tc.addr)
+			assert.Error(t, err)
+			assert.False(t, errors.Is(err, ErrBadRequest), "got %v", err)
+			assert.Contains(t, err.Error(), tc.dialed)
+		})
+	}
+
+	// An unbracketed IPv6 literal is not an address with a port.
+	_, err := dialFunc(nil, true)("tcp", "::1")
+	assert.True(t, errors.Is(err, ErrBadRequest), "got %v", err)
+}
+
+func TestTokenizerIPv6Upstream(t *testing.T) {
+	l, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	appServer := httptest.NewUnstartedServer(echo)
+	appServer.Listener.Close()
+	appServer.Listener = l
+	appServer.StartTLS()
+	defer appServer.Close()
+
+	// httptest's certificate is valid for ::1.
+	UpstreamTrust.AddCert(appServer.Certificate())
+
+	var (
+		pub, priv, _ = box.GenerateKey(rand.Reader)
+		sealKey      = hex.EncodeToString(pub[:])
+		openKey      = hex.EncodeToString(priv[:])
+	)
+	tkzServer := httptest.NewServer(NewTokenizer(openKey, AllowPrivateUpstreams()))
+	defer tkzServer.Close()
+
+	auth := "trustno1"
+	token := "supersecret"
+	secret, err := (&Secret{
+		AuthConfig:      NewBearerAuthConfig(auth),
+		ProcessorConfig: &InjectProcessorConfig{Token: token},
+		RequestValidators: []RequestValidator{
+			AllowHosts(appServer.Listener.Addr().String()),
+		},
+	}).Seal(sealKey)
+	assert.NoError(t, err)
+
+	client, err := Client(tkzServer.URL, WithAuth(auth), WithSecret(secret, nil))
+	assert.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "http://"+appServer.Listener.Addr().String()+"/foo", nil)
+	assert.NoError(t, err)
+	assert.Equal(t, &echoResponse{
+		Headers: http.Header{"Authorization": {"Bearer " + token}},
+		Body:    "",
+	}, doEcho(t, client, req))
+}

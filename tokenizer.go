@@ -562,7 +562,15 @@ func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Co
 			return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
 		}
 
-		hostname, port, _ := strings.Cut(addr, ":")
+		hostname, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			// A missing port means the default one, as it always has.
+			var addrErr *net.AddrError
+			if !errors.As(err, &addrErr) || addrErr.Err != "missing port in address" {
+				return nil, fmt.Errorf("%w: bad dial address %q: %w", ErrBadRequest, addr, err)
+			}
+			hostname, port = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]"), ""
+		}
 		if hostname == "" {
 			return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
 		}
@@ -572,7 +580,7 @@ func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Co
 		case "80", "":
 			port = "443"
 		}
-		addr = fmt.Sprintf("%s:%s", hostname, port)
+		addr = net.JoinHostPort(hostname, port)
 
 		return tls.DialWithDialer(&netDialer, network, addr, &tls.Config{RootCAs: UpstreamTrust})
 	}
