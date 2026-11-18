@@ -2,6 +2,7 @@ package tokenizer
 
 import (
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
@@ -44,11 +45,15 @@ func TestSplitHostOptionalPort(t *testing.T) {
 		{"[::1]443", "", "", "extra data"},
 	} {
 		host, port, err := SplitHostOptionalPort(tc.hostport, "80")
-		t.Logf("testing %v got %v,%v,%v\n", tc, host, port, err)
 		if tc.err == "" {
 			assert.NoError(t, err)
 			assert.Equal(t, host, tc.host)
 			assert.Equal(t, port, tc.port)
+			joined := net.JoinHostPort(host, port)
+			if port != "80" {
+				// Joining returns the original hostport, except when defaulting.
+				assert.Equal(t, joined, tc.hostport)
+			}
 		} else {
 			assert.Error(t, err)
 			assert.Zero(t, host)
