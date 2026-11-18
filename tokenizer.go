@@ -562,17 +562,20 @@ func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Co
 			return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
 		}
 
-		hostname, port, _ := strings.Cut(addr, ":")
-		if hostname == "" {
-			return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
+		hostname, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
+		}
+		if hostname == "" || port == "" {
+			return nil, fmt.Errorf("%w: attempt to dial without host or port: %q", ErrBadRequest, addr)
 		}
 		switch port {
 		case "443":
 			return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
-		case "80", "":
+		case "80":
 			port = "443"
 		}
-		addr = fmt.Sprintf("%s:%s", hostname, port)
+		addr = net.JoinHostPort(hostname, port)
 
 		return tls.DialWithDialer(&netDialer, network, addr, &tls.Config{RootCAs: UpstreamTrust})
 	}

@@ -841,3 +841,19 @@ func TestDialFuncDeniesInternalAddresses(t *testing.T) {
 	assert.Error(t, err)
 	assert.False(t, errors.Is(err, ErrBadRequest), "got %v", err)
 }
+
+func TestDialFuncSplitsPort(t *testing.T) {
+	for _, tc := range []struct{ name, addr, err string }{
+		{"https port", "example.com:443", "proxied request must be HTTP"},
+		{"ipv6 literal https port", "[::1]:443", "proxied request must be HTTP"},
+		{"empty host", ":80", "without host"},
+		{"empty ipv6 host", "[]:80", "without host"},
+		{"empty address", "", "missing port in address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := dialFunc(nil, true)("tcp", tc.addr)
+			assert.True(t, errors.Is(err, ErrBadRequest), "got %v", err)
+			assert.Contains(t, err.Error(), tc.err)
+		})
+	}
+}
