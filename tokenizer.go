@@ -502,6 +502,45 @@ func errorResponse(err error) *http.Response {
 	}
 }
 
+// SplitHostOptionalPort splits host:port into host and port.
+// If port is not specified, defport is returned.
+// It acts like net.SplitHostPort but does not error when there is no port and instead
+// returns the default port value.
+func SplitHostOptionalPort(hostport string, defport string) (host, port string, err error) {
+	isMissingPortErr := func(err error) bool {
+		const missingPort = "missing port in address"
+		var addrErr *net.AddrError
+		return errors.As(err, &addrErr) && addrErr.Err == missingPort
+	}
+
+	host, port, err = net.SplitHostPort(hostport)
+	switch {
+	case isMissingPortErr(err):
+		if len(hostport) > 0 && hostport[0] == '[' {
+			// For bracketed addresses, host is whats inside the brackets.
+			end := strings.Index(hostport, "]")
+			switch {
+			case end == -1:
+				return "", "", fmt.Errorf("bracketed address has no closing bracket")
+			case end != len(hostport)-1:
+				return "", "", fmt.Errorf("extra data after bracketed address")
+			}
+
+			host = hostport[1:end]
+		} else {
+			// For unbracketed addresses, host is the whole string.
+			host = hostport
+		}
+		return host, defport, nil
+	case err != nil:
+		return "", "", err
+	case port == "":
+		return host, defport, nil
+	default:
+		return host, port, nil
+	}
+}
+
 // dialFunc returns a function for dialing network addresses. Ours does a few
 // special things.
 //   - It denies connections to private, loopback, unspecified, link-local, and
@@ -562,17 +601,20 @@ func dialFunc(badAddrs []string, allowPrivate bool) func(string, string) (net.Co
 			return nil, fmt.Errorf("%w: dialing network %s not supported", ErrBadRequest, network)
 		}
 
-		hostname, port, _ := strings.Cut(addr, ":")
+		hostname, port, err := SplitHostOptionalPort(addr, "80")
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
+		}
 		if hostname == "" {
 			return nil, fmt.Errorf("%w: attempt to dial without host: %q", ErrBadRequest, addr)
 		}
 		switch port {
 		case "443":
 			return nil, fmt.Errorf("%w: proxied request must be HTTP", ErrBadRequest)
-		case "80", "":
+		case "80":
 			port = "443"
 		}
-		addr = fmt.Sprintf("%s:%s", hostname, port)
+		addr = net.JoinHostPort(hostname, port)
 
 		return tls.DialWithDialer(&netDialer, network, addr, &tls.Config{RootCAs: UpstreamTrust})
 	}
